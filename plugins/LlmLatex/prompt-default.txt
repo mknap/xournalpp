@@ -1,0 +1,4 @@
+Convert the selected Xournal++ content into LaTeX.
+Use the selection metadata provided by the plugin.
+Images are metadata-only in this MVP.
+Return only JSON with a single key named "latex".
