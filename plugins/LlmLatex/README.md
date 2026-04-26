@@ -1,9 +1,6 @@
-# LLM to LaTeX Plugin (MVP)
+# LLM to LaTeX Plugin
 
-This plugin sends the current Xournal++ selection to an external LLM endpoint and inserts the returned LaTeX as a text element.
-
-Current phase: MVP fallback behavior.
-Returned LaTeX is inserted with app.addTexts, not as a native TeX object yet.
+This plugin sends the current Xournal++ selection to an external LLM endpoint and inserts the returned LaTeX as a native TeX element.
 
 ## What It Does
 
@@ -224,15 +221,13 @@ Response body is truncated internally to 20000 characters before parsing.
 - If results look wrong, verify your selection contains the intended strokes/texts/images.
 - Network request failed (curl exit N): verify URL, TLS, proxy, and connectivity.
 - Endpoint did not return a usable LaTeX string: check response format.
-- Failed to insert LaTeX text: verify document edit state and selection/page context.
+- Failed to insert LaTeX element: verify document edit state, LaTeX generator availability, and selection/page context.
 
 When `show_debug_dialogs` is enabled, the plugin shows a request/response debug dialog after running the request. The preview redacts the bearer token and may truncate large payloads.
 
 
-## Known MVP Limitations
+## Current Limitations
 
-- Inserts plain text, not native TeX objects.
 - Embedded images are currently represented as metadata/placeholder rectangles in the generated SVG.
 - Response parsing is minimal and expects simple JSON or plain text output.
-
-Phase 2 will add true native TeX insertion via core API support.
+- Native TeX insertion now depends on the core LaTeX generator configuration being available at runtime.
