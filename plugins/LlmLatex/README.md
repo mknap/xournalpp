@@ -53,6 +53,14 @@ Registered action:
 
 - Menu name: LLM to LaTeX (MVP)
 - Accelerator: Shift+Alt+L
+- Toolbar action ID: Plugin::LLM_LATEX
+- Toolbar icon: xopp-tool-math-tex
+
+To add a toolbar button:
+
+1. Enable the plugin and restart Xournal++ if needed.
+2. Open toolbar customization in Xournal++ and add the plugin action.
+3. Or edit your toolbar config entry (e.g. `toolbarTop1`) and include `Plugin::LLM_LATEX`.
 
 ## Configuration
 
@@ -71,6 +79,7 @@ Environment variables take precedence over config file values.
 - XOJ_LLM_LATEX_MODEL
 - XOJ_LLM_LATEX_PROMPT_FILE
 - XOJ_LLM_LATEX_TIMEOUT_SEC
+- XOJ_LLM_LATEX_SHOW_DEBUG_DIALOGS
 
 ### Config File
 
@@ -96,6 +105,7 @@ Supported config keys:
 - model
 - prompt_file
 - timeout_sec
+- show_debug_dialogs
 
 Example:
 
@@ -106,6 +116,7 @@ api_key=replace-with-token
 model=gpt-4.1-mini
 prompt_file=prompt-default.txt
 timeout_sec=20
+show_debug_dialogs=false
 ```
 
 ### Effective Defaults
@@ -215,7 +226,7 @@ Response body is truncated internally to 20000 characters before parsing.
 - Endpoint did not return a usable LaTeX string: check response format.
 - Failed to insert LaTeX text: verify document edit state and selection/page context.
 
-For testing, the plugin shows a curl preview dialog before running the request. The preview redacts the bearer token and may truncate large payloads.
+When `show_debug_dialogs` is enabled, the plugin shows a request/response debug dialog after running the request. The preview redacts the bearer token and may truncate large payloads.
 
 
 ## Known MVP Limitations
