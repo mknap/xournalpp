@@ -11,6 +11,7 @@ local DEFAULT_PROMPT_FILENAME = "prompt-default.txt"
 local DEFAULT_API_TYPE = "openai"
 local DEFAULT_SELECTION_IMAGE_WIDTH = 2200
 local DEFAULT_SELECTION_CROP_PADDING = 8
+local DEFAULT_FAST_CROP = true
 local DEFAULT_SHOW_DEBUG_DIALOGS = false
 
 local DEFAULT_TIMEOUT_SEC = 15
@@ -82,6 +83,39 @@ end
 
 local function stripTrailingSlash(url)
   return (url:gsub("/+$", ""))
+end
+
+local function monotonicMs()
+  local f = io.open("/proc/uptime", "r")
+  if f then
+    local line = f:read("*l")
+    f:close()
+    local secs = line and tonumber((line:match("^(%S+)")))
+    if secs then
+      return math.floor(secs * 1000)
+    end
+  end
+  return (os.time() or 0) * 1000
+end
+
+local function elapsedMs(startMs)
+  return math.max(0, monotonicMs() - (tonumber(startMs) or 0))
+end
+
+local function appendTimingMeta(lines, prefix, timing)
+  if type(timing) ~= "table" then
+    return
+  end
+
+  local keys = {}
+  for k, _ in pairs(timing) do
+    keys[#keys + 1] = tostring(k)
+  end
+  table.sort(keys)
+
+  for _, key in ipairs(keys) do
+    lines[#lines + 1] = tostring(prefix or "") .. key .. "=" .. tostring(timing[key])
+  end
 end
 
 local function encodeBase64(data)
@@ -230,12 +264,15 @@ local function resolveSettings()
       os.getenv("XOJ_LLM_LATEX_SELECTION_IMAGE_WIDTH") or cfg.selection_image_width or tostring(DEFAULT_SELECTION_IMAGE_WIDTH)
   local cropPaddingRaw =
       os.getenv("XOJ_LLM_LATEX_SELECTION_CROP_PADDING") or cfg.selection_crop_padding or tostring(DEFAULT_SELECTION_CROP_PADDING)
+  local fastCropRaw =
+      os.getenv("XOJ_LLM_LATEX_FAST_CROP") or cfg.fast_crop
     local showDebugDialogsRaw =
       os.getenv("XOJ_LLM_LATEX_SHOW_DEBUG_DIALOGS") or cfg.show_debug_dialogs
   local timeoutRaw = os.getenv("XOJ_LLM_LATEX_TIMEOUT_SEC") or cfg.timeout_sec or tostring(DEFAULT_TIMEOUT_SEC)
   local timeoutSec = tonumber(timeoutRaw) or DEFAULT_TIMEOUT_SEC
   local selectionImageWidth = tonumber(imageWidthRaw) or DEFAULT_SELECTION_IMAGE_WIDTH
   local selectionCropPadding = tonumber(cropPaddingRaw) or DEFAULT_SELECTION_CROP_PADDING
+  local fastCrop = parseBool(fastCropRaw, DEFAULT_FAST_CROP)
     local showDebugDialogs = parseBool(showDebugDialogsRaw, DEFAULT_SHOW_DEBUG_DIALOGS)
   if timeoutSec < 2 then
     timeoutSec = 2
@@ -268,6 +305,7 @@ local function resolveSettings()
     promptPath = promptPath,
     selectionImageWidth = math.floor(selectionImageWidth),
     selectionCropPadding = selectionCropPadding,
+    fastCrop = fastCrop,
     showDebugDialogs = showDebugDialogs,
     timeoutSec = math.floor(timeoutSec)
   }
@@ -758,13 +796,23 @@ local function fileSize(path)
   return sz
 end
 
+local CROP_COMMAND_CACHE = nil
+
 local function findCropCommand()
+  if CROP_COMMAND_CACHE ~= nil then
+    return CROP_COMMAND_CACHE
+  end
+
   if commandSucceeded(os.execute("command -v magick >/dev/null 2>&1")) then
-    return "magick"
+    CROP_COMMAND_CACHE = "magick"
+    return CROP_COMMAND_CACHE
   end
   if commandSucceeded(os.execute("command -v convert >/dev/null 2>&1")) then
-    return "convert"
+    CROP_COMMAND_CACHE = "convert"
+    return CROP_COMMAND_CACHE
   end
+
+  CROP_COMMAND_CACHE = false
   return nil
 end
 
@@ -829,29 +877,56 @@ local function renderSvgFileToPng(svgPath, pngPath, targetWidth)
   return false, "Failed to render selection SVG to PNG."
 end
 
-local function renderSelectionDataAsBase64Png(settings, payload)
+local function renderSelectionDataAsBase64Png(settings, payload, timing)
+  local stepStart = monotonicMs()
   local svgPath = os.tmpname() .. "_llm_sel.svg"
   local pngPath = os.tmpname() .. "_llm_sel.png"
   local svgText = buildSelectionSvg(payload)
+  if timing then
+    timing.svg_build_ms = elapsedMs(stepStart)
+  end
 
+  stepStart = monotonicMs()
   if not writeAll(svgPath, svgText) then
     return nil, nil, "Failed to write temporary selection SVG."
   end
+  if timing then
+    timing.svg_write_ms = elapsedMs(stepStart)
+  end
 
+  stepStart = monotonicMs()
   local ok, renderErr = renderSvgFileToPng(svgPath, pngPath, settings.selectionImageWidth)
+  if timing then
+    timing.svg_render_ms = elapsedMs(stepStart)
+  end
   os.remove(svgPath)
   if not ok then
     os.remove(pngPath)
     return nil, nil, renderErr
   end
 
+  stepStart = monotonicMs()
   local pngData = readAll(pngPath)
+  if timing then
+    timing.png_read_ms = elapsedMs(stepStart)
+  end
   os.remove(pngPath)
   if not pngData or pngData == "" then
     return nil, nil, "Failed to read rendered selection PNG."
   end
 
-  return encodeBase64(pngData), pngData
+  if timing then
+    timing.selection_png_bytes = #pngData
+  end
+
+  stepStart = monotonicMs()
+  local encoded = encodeBase64(pngData)
+  if timing then
+    timing.base64_encode_ms = elapsedMs(stepStart)
+    timing.selection_b64_chars = #encoded
+  end
+
+  return encoded, pngData
 end
 
 local function getImageDimensions(path)
@@ -900,7 +975,8 @@ local function cropToRect(cropTool, inputPath, outputPath, x, y, w, h)
   return false
 end
 
-local function cropSelectionImageIfPossible(inputPath, outputPath, payload, settings)
+local function cropSelectionImageIfPossible(inputPath, outputPath, payload, settings, timing)
+  local stepStart = monotonicMs()
   local pageWidth = tonumber(payload.context.pageWidth)
   local pageHeight = tonumber(payload.context.pageHeight)
   if not pageWidth or not pageHeight or pageWidth <= 0 or pageHeight <= 0 then
@@ -913,6 +989,9 @@ local function cropSelectionImageIfPossible(inputPath, outputPath, payload, sett
   end
 
   local imgW, imgH = getImageDimensions(inputPath)
+  if timing then
+    timing.crop_get_dimensions_ms = elapsedMs(stepStart)
+  end
   if not imgW or not imgH or imgW <= 0 or imgH <= 0 then
     return inputPath, "Could not read exported image dimensions for selection crop."
   end
@@ -954,10 +1033,35 @@ local function cropSelectionImageIfPossible(inputPath, outputPath, payload, sett
     {name = "XY", x = xFlip, y = yFlip}
   }
 
+  if settings.fastCrop then
+    local fastStart = monotonicMs()
+    local fastPath = os.tmpname() .. "_crop_xy_fast.png"
+    local fastOk = cropToRect(cropTool, inputPath, fastPath, x, y, w, h)
+    if timing then
+      timing.crop_fast_xy_ms = elapsedMs(fastStart)
+    end
+    if fastOk and fileExists(fastPath) then
+      os.remove(outputPath)
+      os.rename(fastPath, outputPath)
+      return outputPath,
+          string.format("crop=xy fast sx=%.5f sy=%.5f rect=%d,%d,%d,%d img=%dx%d",
+              sx,
+              sy,
+              x,
+              y,
+              w,
+              h,
+              imgW,
+              imgH)
+    end
+    os.remove(fastPath)
+  end
+
   local bestPath = nil
   local bestScore = -1
   local bestName = ""
   local scores = {}
+  local loopStart = monotonicMs()
   for _, c in ipairs(candidates) do
     local p = os.tmpname() .. "_crop_" .. c.name .. ".png"
     local ok = cropToRect(cropTool, inputPath, p, c.x, c.y, w, h)
@@ -971,6 +1075,9 @@ local function cropSelectionImageIfPossible(inputPath, outputPath, payload, sett
     else
       os.remove(p)
     end
+  end
+  if timing then
+    timing.crop_heuristic_ms = elapsedMs(loopStart)
   end
 
   if bestPath and bestScore > 0 then
@@ -1005,10 +1112,15 @@ local function cropSelectionImageIfPossible(inputPath, outputPath, payload, sett
           imgH)
 end
 
-local function renderSelectionAsBase64Png(settings, payload)
+local function renderSelectionAsBase64Png(settings, payload, timing)
+  local totalStart = monotonicMs()
   -- Preferred path: render selected data directly, so selected overlay content is always included.
-  local selB64, selPng, selErr = renderSelectionDataAsBase64Png(settings, payload)
+  local selB64, selPng, selErr = renderSelectionDataAsBase64Png(settings, payload, timing)
   if selB64 then
+    if timing then
+      timing.render_path = "selection-svg"
+      timing.raster_total_ms = elapsedMs(totalStart)
+    end
     return selB64, selPng, "selection-svg-rasterized"
   end
 
@@ -1023,7 +1135,12 @@ local function renderSelectionAsBase64Png(settings, payload)
     pngWidth = settings.selectionImageWidth
   }
 
+  local stepStart = monotonicMs()
   local ok, exportErr = pcall(app.export, exportOpts)
+  if timing then
+    timing.render_path = "page-export-fallback"
+    timing.export_page_ms = elapsedMs(stepStart)
+  end
   if not ok then
     os.remove(pagePath)
     os.remove(cropPath)
@@ -1031,8 +1148,17 @@ local function renderSelectionAsBase64Png(settings, payload)
       " (selection-svg render error: " .. tostring(selErr or "unknown") .. ")"
   end
 
-  local finalPath, cropErr = cropSelectionImageIfPossible(pagePath, cropPath, payload, settings)
+  local cropStart = monotonicMs()
+  local finalPath, cropErr = cropSelectionImageIfPossible(pagePath, cropPath, payload, settings, timing)
+  if timing then
+    timing.crop_total_ms = elapsedMs(cropStart)
+  end
+
+  local readStart = monotonicMs()
   local pngData = readAll(finalPath)
+  if timing then
+    timing.fallback_png_read_ms = elapsedMs(readStart)
+  end
 
   os.remove(pagePath)
   if finalPath ~= cropPath then
@@ -1050,8 +1176,17 @@ local function renderSelectionAsBase64Png(settings, payload)
     os.remove(cropPath)
   end
 
+  local b64Start = monotonicMs()
+  local encoded = encodeBase64(pngData)
+  if timing then
+    timing.base64_encode_ms = elapsedMs(b64Start)
+    timing.selection_png_bytes = #pngData
+    timing.selection_b64_chars = #encoded
+    timing.raster_total_ms = elapsedMs(totalStart)
+  end
+
   local warning = "selection-svg render fallback: " .. tostring(selErr or "unknown") .. "; " .. tostring(cropErr or "")
-  return encodeBase64(pngData), pngData, warning
+  return encoded, pngData, warning
 end
 
 local function persistDebugFile(filename, content)
@@ -1080,14 +1215,16 @@ local function saveDebugSnapshot(endpoint, body, raw, curlErr, httpCode, exitCod
     end
   end
 
-  local meta = table.concat({
+  local metaLines = {
     "timestamp=" .. os.date("%Y-%m-%d %H:%M:%S"),
     "endpoint=" .. tostring(endpoint or ""),
     "curl_exit=" .. tostring(exitCode or ""),
     "http_status=" .. tostring(httpCode or ""),
     "curl_stderr=" .. tostring(curlErr or ""),
     "selection_crop_warning=" .. tostring((debugParts and debugParts.selectionCropWarning) or "")
-  }, "\n")
+  }
+  appendTimingMeta(metaLines, "timing_", debugParts and debugParts.timing)
+  local meta = table.concat(metaLines, "\n")
   local metaPath = persistDebugFile("llm_latex_last_debug.txt", meta)
 
   return requestPath, responsePath, metaPath
@@ -1161,7 +1298,13 @@ local function buildCurlPreview(settings, body)
   return truncateForDialog(table.concat(parts, " "), MAX_CURL_DIALOG_CHARS)
 end
 
-local function requestLatex(settings, payload, promptText)
+local function requestLatex(settings, payload, promptText, runTiming)
+  local requestTiming = {
+    api_type = settings.apiType,
+    pipeline_start_ms = runTiming and runTiming.pipeline_start_ms or nil
+  }
+  local requestStart = monotonicMs()
+
   local bodyPath = os.tmpname()
   local outPath = os.tmpname()
   local httpPath = os.tmpname()
@@ -1173,7 +1316,9 @@ local function requestLatex(settings, payload, promptText)
   local selectionCropWarning = nil
   if settings.apiType == "ollama" then
     local imageErr
-    selectionImageBase64, selectionImageData, imageErr = renderSelectionAsBase64Png(settings, payload)
+    local rasterStart = monotonicMs()
+    selectionImageBase64, selectionImageData, imageErr = renderSelectionAsBase64Png(settings, payload, requestTiming)
+    requestTiming.raster_stage_ms = elapsedMs(rasterStart)
     if not selectionImageBase64 then
       return nil, imageErr or "Failed to rasterize current selection for model request."
     end
@@ -1185,13 +1330,20 @@ local function requestLatex(settings, payload, promptText)
     debugParts.selectionImageData = selectionImageData
     debugParts.selectionCropWarning = selectionCropWarning
   end
+
+  local stepStart = monotonicMs()
   local body = encodeJson(requestPayload)
+  requestTiming.encode_json_ms = elapsedMs(stepStart)
+
   if #body > MAX_REQUEST_BODY_CHARS then
     return nil, "Payload too large; reduce selection size."
   end
+
+  stepStart = monotonicMs()
   if not writeAll(bodyPath, body) then
     return nil, "Could not write temporary request file."
   end
+  requestTiming.write_body_file_ms = elapsedMs(stepStart)
 
   local requestSettings = {
     apiKey = settings.apiKey,
@@ -1200,14 +1352,32 @@ local function requestLatex(settings, payload, promptText)
   }
   local cmd = buildCurlCommand(requestSettings, bodyPath, outPath, httpPath, errPath, statusPath)
 
+  stepStart = monotonicMs()
   os.execute(cmd)
+  requestTiming.curl_exec_ms = elapsedMs(stepStart)
 
+  stepStart = monotonicMs()
   local statusText = readAll(statusPath) or "999"
   local code = tonumber(trim(statusText)) or 999
   local httpCodeText = trim(readAll(httpPath) or "")
   local httpCode = tonumber(httpCodeText) or 0
   local curlErr = trim(readAll(errPath) or "")
   local raw = readAll(outPath) or ""
+  requestTiming.read_http_artifacts_ms = elapsedMs(stepStart)
+
+  stepStart = monotonicMs()
+  local latex = trim(extractLatexFromResponse(settings, raw) or "")
+  requestTiming.extract_latex_ms = elapsedMs(stepStart)
+
+  requestTiming.total_request_ms = elapsedMs(requestStart)
+  if runTiming and runTiming.pipeline_start_ms then
+    requestTiming.pre_request_ms = math.max(0, requestStart - runTiming.pipeline_start_ms)
+    requestTiming.total_pipeline_ms = math.max(0, monotonicMs() - runTiming.pipeline_start_ms)
+  end
+
+  if debugParts then
+    debugParts.timing = requestTiming
+  end
 
   local requestPath, responsePath, metaPath =
       saveDebugSnapshot(requestSettings.endpoint, body, raw, curlErr, httpCode, code, debugParts)
@@ -1244,7 +1414,6 @@ local function requestLatex(settings, payload, promptText)
     raw = raw:sub(1, MAX_RESPONSE_CHARS)
   end
 
-  local latex = trim(extractLatexFromResponse(settings, raw) or "")
   if latex == "" then
     return nil, "Endpoint did not return a usable LaTeX string."
   end
@@ -1306,7 +1475,13 @@ function initUi()
 end
 
 function runLlmLatexMvp()
+  local runTiming = {
+    pipeline_start_ms = monotonicMs()
+  }
+
+  local stepStart = monotonicMs()
   local settings = resolveSettings()
+  runTiming.resolve_settings_ms = elapsedMs(stepStart)
   if settings.endpoint == "" then
     showError(
       "Missing endpoint. Set XOJ_LLM_LATEX_ENDPOINT or configure " .. CONFIG_FILENAME .. " in plugin config folder."
@@ -1318,19 +1493,25 @@ function runLlmLatexMvp()
     return
   end
 
+  stepStart = monotonicMs()
   local payload, hasSelection, selectionInfo = buildPayload(settings)
+  runTiming.build_payload_ms = elapsedMs(stepStart)
   if not hasSelection then
     showError("Selection is empty. Select content first.")
     return
   end
 
+  stepStart = monotonicMs()
   local promptText, promptErr = loadPromptText(settings.promptPath)
+  runTiming.load_prompt_ms = elapsedMs(stepStart)
   if not promptText then
     showError(promptErr)
     return
   end
 
-  local latex, err = requestLatex(settings, payload, promptText)
+  stepStart = monotonicMs()
+  local latex, err = requestLatex(settings, payload, promptText, runTiming)
+  runTiming.request_call_ms = elapsedMs(stepStart)
   if not latex then
     showError(err)
     return
