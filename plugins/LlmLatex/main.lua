@@ -5,10 +5,13 @@
 
 local CONFIG_FILENAME = "llm_latex.conf"
 local MENU_NAME = "LLM to LaTeX (MVP)"
+local TOOLBAR_ID = "LLM_LATEX"
+local TOOLBAR_ICON_NAME = "xopp-tool-math-tex"
 local DEFAULT_PROMPT_FILENAME = "prompt-default.txt"
 local DEFAULT_API_TYPE = "openai"
 local DEFAULT_SELECTION_IMAGE_WIDTH = 2200
 local DEFAULT_SELECTION_CROP_PADDING = 8
+local DEFAULT_SHOW_DEBUG_DIALOGS = false
 
 local DEFAULT_TIMEOUT_SEC = 15
 local MAX_STROKES = 50
@@ -61,6 +64,20 @@ local function normalizeApiType(value)
     return "ollama"
   end
   return DEFAULT_API_TYPE
+end
+
+local function parseBool(value, fallback)
+  if value == nil then
+    return fallback
+  end
+  local s = trim(tostring(value)):lower()
+  if s == "1" or s == "true" or s == "yes" or s == "on" then
+    return true
+  end
+  if s == "0" or s == "false" or s == "no" or s == "off" then
+    return false
+  end
+  return fallback
 end
 
 local function stripTrailingSlash(url)
@@ -213,10 +230,13 @@ local function resolveSettings()
       os.getenv("XOJ_LLM_LATEX_SELECTION_IMAGE_WIDTH") or cfg.selection_image_width or tostring(DEFAULT_SELECTION_IMAGE_WIDTH)
   local cropPaddingRaw =
       os.getenv("XOJ_LLM_LATEX_SELECTION_CROP_PADDING") or cfg.selection_crop_padding or tostring(DEFAULT_SELECTION_CROP_PADDING)
+    local showDebugDialogsRaw =
+      os.getenv("XOJ_LLM_LATEX_SHOW_DEBUG_DIALOGS") or cfg.show_debug_dialogs
   local timeoutRaw = os.getenv("XOJ_LLM_LATEX_TIMEOUT_SEC") or cfg.timeout_sec or tostring(DEFAULT_TIMEOUT_SEC)
   local timeoutSec = tonumber(timeoutRaw) or DEFAULT_TIMEOUT_SEC
   local selectionImageWidth = tonumber(imageWidthRaw) or DEFAULT_SELECTION_IMAGE_WIDTH
   local selectionCropPadding = tonumber(cropPaddingRaw) or DEFAULT_SELECTION_CROP_PADDING
+    local showDebugDialogs = parseBool(showDebugDialogsRaw, DEFAULT_SHOW_DEBUG_DIALOGS)
   if timeoutSec < 2 then
     timeoutSec = 2
   end
@@ -248,6 +268,7 @@ local function resolveSettings()
     promptPath = promptPath,
     selectionImageWidth = math.floor(selectionImageWidth),
     selectionCropPadding = selectionCropPadding,
+    showDebugDialogs = showDebugDialogs,
     timeoutSec = math.floor(timeoutSec)
   }
 end
@@ -1190,7 +1211,9 @@ local function requestLatex(settings, payload, promptText)
 
   local requestPath, responsePath, metaPath =
       saveDebugSnapshot(requestSettings.endpoint, body, raw, curlErr, httpCode, code, debugParts)
-  showDebugSnapshotDialog(requestPath, responsePath, metaPath, body, raw)
+  if settings.showDebugDialogs then
+    showDebugSnapshotDialog(requestPath, responsePath, metaPath, body, raw)
+  end
 
   os.remove(bodyPath)
   os.remove(outPath)
@@ -1269,6 +1292,8 @@ function initUi()
   app.registerUi({
     ["menu"] = MENU_NAME,
     ["callback"] = "runLlmLatexMvp",
+    ["toolbarId"] = TOOLBAR_ID,
+    ["iconName"] = TOOLBAR_ICON_NAME,
     ["accelerator"] = "<Alt>a"
   })
 end
