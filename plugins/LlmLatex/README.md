@@ -70,7 +70,6 @@ Environment variables take precedence over config file values.
 - XOJ_LLM_LATEX_API_KEY
 - XOJ_LLM_LATEX_MODEL
 - XOJ_LLM_LATEX_PROMPT_FILE
-- XOJ_LLM_LATEX_SELECTION_IMAGE_WIDTH
 - XOJ_LLM_LATEX_TIMEOUT_SEC
 
 ### Config File
@@ -96,7 +95,6 @@ Supported config keys:
 - api_key
 - model
 - prompt_file
-- selection_image_width
 - timeout_sec
 
 Example:
@@ -107,7 +105,6 @@ endpoint=https://api.openai.com
 api_key=replace-with-token
 model=gpt-4.1-mini
 prompt_file=prompt-default.txt
-selection_image_width=1800
 timeout_sec=20
 ```
 
@@ -119,7 +116,6 @@ timeout_sec=20
 - api_key optional
 - model optional
 - prompt_file default: prompt-default.txt
-- selection_image_width default: 1800
 - endpoint required
 
 If endpoint is missing, the plugin shows an error dialog and exits.
@@ -129,7 +125,7 @@ API type behavior:
 1. `api_type=openai` sends a Chat Completions request to `/v1/chat/completions` using `messages` and `response_format`.
 2. `api_type=ollama` sends a native Ollama chat request to `/api/chat` using `messages`, `stream=false`, and `format="json"`.
 3. If `endpoint` is a base URL, the plugin appends the correct path for the selected API.
-4. For `api_type=ollama`, the plugin exports the current page to PNG and sends that image as `messages[].images`.
+4. For both API types, the plugin sends sanitized selection JSON and an SVG rendering of the selected content as text in the user message.
 
 Prompt handling:
 
@@ -154,11 +150,11 @@ Ollama request shape:
 - model
 - messages
   - system: prompt file contents
-  - user: conversion instruction + selection bounds metadata + `images: [<base64 PNG>]`
+  - user: conversion instruction + selection summary + full selection JSON + SVG markup
 - stream: false
 - format: json
 
-Selection metadata embedded in the user message includes:
+Selection data embedded in the user message includes:
 
 - selection:
   - toolInfo
@@ -173,6 +169,8 @@ Selection metadata embedded in the user message includes:
   - promptFile
   - selectionBounds
   - note
+- svg:
+  - generated SVG markup of the selected strokes/texts plus image placeholders
 
 Safety and payload limits used by the plugin:
 
@@ -212,7 +210,7 @@ Response body is truncated internally to 20000 characters before parsing.
 - Selection is empty: select at least one stroke, text, or image first.
 - Prompt file is empty or missing: verify `prompt_file` and the target file contents.
 - Wrong API type: set `api_type=ollama` for native Ollama endpoints or `api_type=openai` for OpenAI-compatible chat endpoints.
-- Image export failed: verify plugin export permissions and try lowering `selection_image_width`.
+- If results look wrong, verify your selection contains the intended strokes/texts/images.
 - Network request failed (curl exit N): verify URL, TLS, proxy, and connectivity.
 - Endpoint did not return a usable LaTeX string: check response format.
 - Failed to insert LaTeX text: verify document edit state and selection/page context.
@@ -223,7 +221,7 @@ For testing, the plugin shows a curl preview dialog before running the request. 
 ## Known MVP Limitations
 
 - Inserts plain text, not native TeX objects.
-- Image content is not uploaded in MVP, only image metadata is sent.
+- Embedded images are currently represented as metadata/placeholder rectangles in the generated SVG.
 - Response parsing is minimal and expects simple JSON or plain text output.
 
 Phase 2 will add true native TeX insertion via core API support.

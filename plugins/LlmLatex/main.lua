@@ -7,7 +7,8 @@ local CONFIG_FILENAME = "llm_latex.conf"
 local MENU_NAME = "LLM to LaTeX (MVP)"
 local DEFAULT_PROMPT_FILENAME = "prompt-default.txt"
 local DEFAULT_API_TYPE = "openai"
-local DEFAULT_SELECTION_IMAGE_WIDTH = 1800
+local DEFAULT_SELECTION_IMAGE_WIDTH = 2200
+local DEFAULT_SELECTION_CROP_PADDING = 8
 
 local DEFAULT_TIMEOUT_SEC = 15
 local MAX_STROKES = 50
@@ -19,6 +20,7 @@ local MAX_CURL_PREVIEW_BODY_CHARS = 1200
 local MAX_CURL_DIALOG_CHARS = 4000
 local MAX_REQUEST_BODY_CHARS = 8000000
 local MAX_CURL_ERROR_CHARS = 1200
+local MAX_DEBUG_PREVIEW_CHARS = 1400
 
 local function shellQuote(s)
   if s == nil then
@@ -83,18 +85,8 @@ local function encodeBase64(data)
 
     result[#result + 1] = alphabet:sub(c1, c1)
     result[#result + 1] = alphabet:sub(c2, c2)
-
-    if i + 1 <= len then
-      result[#result + 1] = alphabet:sub(c3, c3)
-    else
-      result[#result + 1] = "="
-    end
-
-    if i + 2 <= len then
-      result[#result + 1] = alphabet:sub(c4, c4)
-    else
-      result[#result + 1] = "="
-    end
+    result[#result + 1] = (i + 1 <= len) and alphabet:sub(c3, c3) or "="
+    result[#result + 1] = (i + 2 <= len) and alphabet:sub(c4, c4) or "="
 
     i = i + 3
   end
@@ -217,16 +209,22 @@ local function resolveSettings()
   local apiKey = os.getenv("XOJ_LLM_LATEX_API_KEY") or cfg.api_key or ""
   local model = os.getenv("XOJ_LLM_LATEX_MODEL") or cfg.model or ""
   local promptFile = os.getenv("XOJ_LLM_LATEX_PROMPT_FILE") or cfg.prompt_file or DEFAULT_PROMPT_FILENAME
-  local selectionImageWidthRaw =
+  local imageWidthRaw =
       os.getenv("XOJ_LLM_LATEX_SELECTION_IMAGE_WIDTH") or cfg.selection_image_width or tostring(DEFAULT_SELECTION_IMAGE_WIDTH)
+  local cropPaddingRaw =
+      os.getenv("XOJ_LLM_LATEX_SELECTION_CROP_PADDING") or cfg.selection_crop_padding or tostring(DEFAULT_SELECTION_CROP_PADDING)
   local timeoutRaw = os.getenv("XOJ_LLM_LATEX_TIMEOUT_SEC") or cfg.timeout_sec or tostring(DEFAULT_TIMEOUT_SEC)
   local timeoutSec = tonumber(timeoutRaw) or DEFAULT_TIMEOUT_SEC
-  local selectionImageWidth = tonumber(selectionImageWidthRaw) or DEFAULT_SELECTION_IMAGE_WIDTH
+  local selectionImageWidth = tonumber(imageWidthRaw) or DEFAULT_SELECTION_IMAGE_WIDTH
+  local selectionCropPadding = tonumber(cropPaddingRaw) or DEFAULT_SELECTION_CROP_PADDING
   if timeoutSec < 2 then
     timeoutSec = 2
   end
-  if selectionImageWidth < 200 then
-    selectionImageWidth = 200
+  if selectionImageWidth < 600 then
+    selectionImageWidth = 600
+  end
+  if selectionCropPadding < 0 then
+    selectionCropPadding = 0
   end
 
   local promptPath = trim(promptFile)
@@ -249,6 +247,7 @@ local function resolveSettings()
     model = trim(model),
     promptPath = promptPath,
     selectionImageWidth = math.floor(selectionImageWidth),
+    selectionCropPadding = selectionCropPadding,
     timeoutSec = math.floor(timeoutSec)
   }
 end
@@ -410,65 +409,211 @@ local function buildPayload(settings)
       images = sanitizeImages(images)
     },
     context = {
-      xoppFilename = doc.xoppFilename,
       currentPage = tonumber(doc.currentPage) or 1,
-      prompt = "",
-      promptFile = settings.promptPath,
-      selectionBounds = (selectionInfo and selectionInfo.snappedBounds) or (selectionInfo and selectionInfo.boundingBox) or {},
-      note = "Images are metadata-only in MVP. " .. latexInstruction()
+      pageWidth = nil,
+      pageHeight = nil,
+      selectionBounds = (selectionInfo and selectionInfo.snappedBounds) or (selectionInfo and selectionInfo.boundingBox) or {}
     }
   }
+
+  local pages = (doc and doc.pages) or {}
+  local page = pages[payload.context.currentPage]
+  if page then
+    payload.context.pageWidth = tonumber(page.pageWidth)
+    payload.context.pageHeight = tonumber(page.pageHeight)
+  end
 
   return payload, hasSelection, selectionInfo
 end
 
-local function buildOllamaSelectionSummary(payload)
-  return {
-    selection = {
-      strokeCount = payload.selection.strokeCount,
-      textCount = payload.selection.textCount,
-      imageCount = payload.selection.imageCount,
-      bounds = payload.context.selectionBounds
-    },
-    context = {
-      xoppFilename = payload.context.xoppFilename,
-      currentPage = payload.context.currentPage
-    }
-  }
+local function xmlEscape(text)
+  return tostring(text or "")
+      :gsub("&", "&amp;")
+      :gsub("<", "&lt;")
+      :gsub(">", "&gt;")
+      :gsub('"', "&quot;")
+      :gsub("'", "&apos;")
 end
 
-local function buildApiRequest(settings, payload, selectionImageBase64)
-  local selectionJson = encodeJson({
-    selection = payload.selection,
-    context = payload.context
-  })
+local function updateExtents(extents, x, y)
+  if type(x) ~= "number" or type(y) ~= "number" then
+    return
+  end
+
+  if not extents.minX or x < extents.minX then extents.minX = x end
+  if not extents.maxX or x > extents.maxX then extents.maxX = x end
+  if not extents.minY or y < extents.minY then extents.minY = y end
+  if not extents.maxY or y > extents.maxY then extents.maxY = y end
+end
+
+local function getSelectionFrame(payload)
+  local bounds = payload.context.selectionBounds or {}
+  local x = tonumber(bounds.x)
+  local y = tonumber(bounds.y)
+  local width = tonumber(bounds.width)
+  local height = tonumber(bounds.height)
+
+  if x and y and width and height and width > 0 and height > 0 then
+    return x, y, width, height
+  end
+
+  local extents = {}
+
+  for _, s in ipairs(payload.selection.strokes or {}) do
+    local pointCount = math.min(#(s.x or {}), #(s.y or {}))
+    for i = 1, pointCount do
+      updateExtents(extents, tonumber(s.x[i]), tonumber(s.y[i]))
+    end
+  end
+
+  for _, t in ipairs(payload.selection.texts or {}) do
+    local tx = tonumber(t.x)
+    local ty = tonumber(t.y)
+    local tw = tonumber(t.width) or 0
+    local th = tonumber(t.height) or 0
+    updateExtents(extents, tx, ty)
+    updateExtents(extents, (tx or 0) + tw, (ty or 0) + th)
+  end
+
+  for _, im in ipairs(payload.selection.images or {}) do
+    local ix = tonumber(im.x)
+    local iy = tonumber(im.y)
+    local iw = tonumber(im.width) or 0
+    local ih = tonumber(im.height) or 0
+    updateExtents(extents, ix, iy)
+    updateExtents(extents, (ix or 0) + iw, (iy or 0) + ih)
+  end
+
+  if extents.minX and extents.maxX and extents.minY and extents.maxY then
+    local pad = 4
+    local ex = extents.minX - pad
+    local ey = extents.minY - pad
+    local ew = math.max(1, (extents.maxX - extents.minX) + pad * 2)
+    local eh = math.max(1, (extents.maxY - extents.minY) + pad * 2)
+    return ex, ey, ew, eh
+  end
+
+  return 0, 0, 1000, 1000
+end
+
+local function colorIntToSvg(color)
+  local n = tonumber(color)
+  if not n then
+    return "#000000"
+  end
+
+  if n < 0 then
+    n = n + 4294967296
+  end
+
+  local rgb = n % 16777216
+  return string.format("#%06x", rgb)
+end
+
+local function fmtCoord(v)
+  return string.format("%.4f", tonumber(v) or 0)
+end
+
+local function buildSelectionSvg(payload)
+  local minX, minY, width, height = getSelectionFrame(payload)
+  local svgPad = 30  -- extra whitespace around content to prevent clipping
+  local svgW = width + svgPad * 2
+  local svgH = height + svgPad * 2
+  local parts = {
+    string.format(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="%.2f" height="%.2f" viewBox="0 0 %.2f %.2f">',
+      svgW,
+      svgH,
+      svgW,
+      svgH
+    ),
+    string.format('<rect x="0" y="0" width="%.2f" height="%.2f" fill="white"/>', svgW, svgH)
+  }
+
+  for _, s in ipairs(payload.selection.strokes or {}) do
+    local pointCount = math.min(#(s.x or {}), #(s.y or {}))
+    if pointCount > 0 then
+      local points = {}
+      for i = 1, pointCount do
+        local x = tonumber(s.x[i]) or 0
+        local y = tonumber(s.y[i]) or 0
+        points[#points + 1] = fmtCoord(x - minX + svgPad) .. "," .. fmtCoord(y - minY + svgPad)
+      end
+
+      parts[#parts + 1] = string.format(
+        '<polyline fill="none" stroke="%s" stroke-width="%.2f" stroke-linecap="round" stroke-linejoin="round" points="%s"/>',
+        colorIntToSvg(s.color),
+        tonumber(s.width) or 1.5,
+        table.concat(points, " ")
+      )
+    end
+  end
+
+  for _, t in ipairs(payload.selection.texts or {}) do
+    local tx = (tonumber(t.x) or 0) - minX + svgPad
+    local ty = (tonumber(t.y) or 0) - minY + svgPad
+    local fontSize = math.max(8, tonumber(t.height) or 16)
+    parts[#parts + 1] = string.format(
+      '<text x="%.2f" y="%.2f" fill="%s" font-size="%.2f">%s</text>',
+      tx,
+      ty,
+      colorIntToSvg(t.color),
+      fontSize,
+      xmlEscape(t.text)
+    )
+  end
+
+  for i, im in ipairs(payload.selection.images or {}) do
+    local ix = (tonumber(im.x) or 0) - minX + svgPad
+    local iy = (tonumber(im.y) or 0) - minY + svgPad
+    local iw = math.max(1, tonumber(im.width) or 1)
+    local ih = math.max(1, tonumber(im.height) or 1)
+    parts[#parts + 1] = string.format(
+      '<rect x="%.2f" y="%.2f" width="%.2f" height="%.2f" fill="#fff8e1" stroke="#cc8800" stroke-dasharray="5 3"/>',
+      ix,
+      iy,
+      iw,
+      ih
+    )
+    parts[#parts + 1] = string.format(
+      '<text x="%.2f" y="%.2f" fill="#cc8800" font-size="12">%s</text>',
+      ix + 4,
+      iy + 14,
+      xmlEscape("image " .. tostring(i) .. " (metadata only)")
+    )
+  end
+
+  parts[#parts + 1] = "</svg>"
+  return table.concat(parts, "\n")
+end
+
+local function buildApiRequest(settings, payload, promptText, selectionImageBase64)
+  local boundsJson = encodeJson(payload.context.selectionBounds or {})
 
   local userContent = table.concat({
-    "Convert this Xournal++ selection into LaTeX.",
+    "Transcribe the selected handwritten math into LaTeX.",
     latexInstruction(),
-    "Selection payload:",
-    selectionJson
+    "The attached image is cropped to the current selection.",
+    "Selection bounds (document units):",
+    boundsJson
   }, "\n\n")
 
   if settings.apiType == "ollama" then
-    local summaryJson = encodeJson(buildOllamaSelectionSummary(payload))
     return {
       model = settings.model,
       stream = false,
       format = "json",
       messages = {
-        { role = "system", content = payload.context.prompt },
+        { role = "system", content = promptText },
         {
           role = "user",
-          content = table.concat({
-            "Convert this selected handwritten content into LaTeX.",
-            latexInstruction(),
-            "Focus on the selected region (bounds in document units):",
-            summaryJson
-          }, "\n\n"),
+          content = userContent,
           images = {selectionImageBase64}
         }
       }
+    }, {
+      userContent = userContent,
+      selectionBounds = boundsJson
     }
   end
 
@@ -476,9 +621,12 @@ local function buildApiRequest(settings, payload, selectionImageBase64)
     model = settings.model,
     response_format = { type = "json_object" },
     messages = {
-      { role = "system", content = payload.context.prompt },
+      { role = "system", content = promptText },
       { role = "user", content = userContent }
     }
+  }, {
+    userContent = userContent,
+    selectionBounds = boundsJson
   }
 end
 
@@ -575,29 +723,376 @@ local function loadPromptText(promptPath)
   return promptText
 end
 
-local function renderCurrentPageAsBase64Png(settings, payload)
-  local tmpPath = os.tmpname() .. ".png"
-  local pageNo = tonumber(payload.context.currentPage) or 1
+local function commandSucceeded(ok)
+  return ok == true or ok == 0
+end
+
+local function fileSize(path)
+  local f = io.open(path, "rb")
+  if not f then
+    return 0
+  end
+  local sz = f:seek("end") or 0
+  f:close()
+  return sz
+end
+
+local function findCropCommand()
+  if commandSucceeded(os.execute("command -v magick >/dev/null 2>&1")) then
+    return "magick"
+  end
+  if commandSucceeded(os.execute("command -v convert >/dev/null 2>&1")) then
+    return "convert"
+  end
+  return nil
+end
+
+local function imageStdDev(path)
+  if not fileExists(path) then
+    return 0
+  end
+
+  local cropTool = findCropCommand() or "magick"
+
+  local statsPath = os.tmpname()
+  local cmd = table.concat({
+    cropTool,
+    shellQuote(path),
+    "-colorspace",
+    "Gray",
+    "-format",
+    shellQuote("%[fx:standard_deviation]"),
+    "info:",
+    ">",
+    shellQuote(statsPath),
+    "2>/dev/null"
+  }, " ")
+
+  if not commandSucceeded(os.execute(cmd)) then
+    os.remove(statsPath)
+    return 0
+  end
+
+  local v = tonumber(trim(readAll(statsPath) or "")) or 0
+  os.remove(statsPath)
+  return v
+end
+
+local function renderSvgFileToPng(svgPath, pngPath, targetWidth)
+  local cropTool = findCropCommand()
+  if not cropTool then
+    return false, "No image render tool found (magick/convert)."
+  end
+
+  local cmd = table.concat({
+    cropTool,
+    "-density",
+    "300",
+    "-background",
+    "white",
+    shellQuote(svgPath),
+    "-alpha",
+    "remove",
+    "-resize",
+    tostring(math.max(800, math.floor(targetWidth or 2200))) .. "x",
+    "-quality",
+    "95",
+    shellQuote(pngPath),
+    ">/dev/null 2>&1"
+  }, " ")
+
+  if commandSucceeded(os.execute(cmd)) and fileExists(pngPath) and fileSize(pngPath) > 0 then
+    return true
+  end
+
+  return false, "Failed to render selection SVG to PNG."
+end
+
+local function renderSelectionDataAsBase64Png(settings, payload)
+  local svgPath = os.tmpname() .. "_llm_sel.svg"
+  local pngPath = os.tmpname() .. "_llm_sel.png"
+  local svgText = buildSelectionSvg(payload)
+
+  if not writeAll(svgPath, svgText) then
+    return nil, nil, "Failed to write temporary selection SVG."
+  end
+
+  local ok, renderErr = renderSvgFileToPng(svgPath, pngPath, settings.selectionImageWidth)
+  os.remove(svgPath)
+  if not ok then
+    os.remove(pngPath)
+    return nil, nil, renderErr
+  end
+
+  local pngData = readAll(pngPath)
+  os.remove(pngPath)
+  if not pngData or pngData == "" then
+    return nil, nil, "Failed to read rendered selection PNG."
+  end
+
+  return encodeBase64(pngData), pngData
+end
+
+local function getImageDimensions(path)
+  if not fileExists(path) then
+    return nil, nil
+  end
+
+  local cropTool = findCropCommand() or "magick"
+  local outPath = os.tmpname()
+  local cmd = table.concat({
+    cropTool,
+    shellQuote(path),
+    "-format",
+    shellQuote("%w %h"),
+    "info:",
+    ">",
+    shellQuote(outPath),
+    "2>/dev/null"
+  }, " ")
+
+  if not commandSucceeded(os.execute(cmd)) then
+    os.remove(outPath)
+    return nil, nil
+  end
+
+  local txt = trim(readAll(outPath) or "")
+  os.remove(outPath)
+  local w, h = txt:match("^(%d+)%s+(%d+)$")
+  return tonumber(w), tonumber(h)
+end
+
+local function cropToRect(cropTool, inputPath, outputPath, x, y, w, h)
+  local cmd = table.concat({
+    cropTool,
+    shellQuote(inputPath),
+    "-crop",
+    string.format("%dx%d+%d+%d", w, h, x, y),
+    "+repage",
+    shellQuote(outputPath),
+    ">/dev/null 2>&1"
+  }, " ")
+
+  if commandSucceeded(os.execute(cmd)) and fileExists(outputPath) and fileSize(outputPath) > 0 then
+    return true
+  end
+  return false
+end
+
+local function cropSelectionImageIfPossible(inputPath, outputPath, payload, settings)
+  local pageWidth = tonumber(payload.context.pageWidth)
+  local pageHeight = tonumber(payload.context.pageHeight)
+  if not pageWidth or not pageHeight or pageWidth <= 0 or pageHeight <= 0 then
+    return inputPath, "Missing page dimensions for selection crop."
+  end
+
+  local bx, by, bw, bh = getSelectionFrame(payload)
+  if not bx or not by or not bw or not bh or bw <= 0 or bh <= 0 then
+    return inputPath, "Missing selection bounds for selection crop."
+  end
+
+  local imgW, imgH = getImageDimensions(inputPath)
+  if not imgW or not imgH or imgW <= 0 or imgH <= 0 then
+    return inputPath, "Could not read exported image dimensions for selection crop."
+  end
+
+  local sx = imgW / pageWidth
+  local sy = imgH / pageHeight
+  local pad = tonumber(settings.selectionCropPadding) or 0
+
+  local x = math.floor((bx - pad) * sx)
+  local y = math.floor((by - pad) * sy)
+  local w = math.ceil((bw + pad * 2) * sx)
+  local h = math.ceil((bh + pad * 2) * sy)
+
+  if x < 0 then x = 0 end
+  if y < 0 then y = 0 end
+  if x >= imgW then x = imgW - 1 end
+  if y >= imgH then y = imgH - 1 end
+  if x + w > imgW then w = imgW - x end
+  if y + h > imgH then h = imgH - y end
+  w = math.max(1, w)
+  h = math.max(1, h)
+
+  local cropTool = findCropCommand()
+  if not cropTool then
+    return inputPath, "No image crop tool found (magick/convert)."
+  end
+
+  local xFlip = imgW - (x + w)
+  local yFlip = imgH - (y + h)
+  if xFlip < 0 then xFlip = 0 end
+  if yFlip < 0 then yFlip = 0 end
+  if xFlip + w > imgW then xFlip = math.max(0, imgW - w) end
+  if yFlip + h > imgH then yFlip = math.max(0, imgH - h) end
+
+  local candidates = {
+    {name = "xy", x = x, y = y},
+    {name = "xY", x = x, y = yFlip},
+    {name = "Xy", x = xFlip, y = y},
+    {name = "XY", x = xFlip, y = yFlip}
+  }
+
+  local bestPath = nil
+  local bestScore = -1
+  local bestName = ""
+  local scores = {}
+  for _, c in ipairs(candidates) do
+    local p = os.tmpname() .. "_crop_" .. c.name .. ".png"
+    local ok = cropToRect(cropTool, inputPath, p, c.x, c.y, w, h)
+    local s = ok and imageStdDev(p) or 0
+    scores[#scores + 1] = c.name .. ":" .. string.format("%.6f", s)
+    if ok and s > bestScore and fileExists(p) then
+      if bestPath and bestPath ~= p then os.remove(bestPath) end
+      bestPath = p
+      bestScore = s
+      bestName = c.name
+    else
+      os.remove(p)
+    end
+  end
+
+  if bestPath and bestScore > 0 then
+    os.remove(outputPath)
+    os.rename(bestPath, outputPath)
+    return outputPath,
+        string.format("crop=%s stddev=%.6f scores=[%s] sx=%.5f sy=%.5f rect=%d,%d,%d,%d img=%dx%d",
+            bestName,
+            bestScore,
+            table.concat(scores, ","),
+            sx,
+            sy,
+            x,
+            y,
+            w,
+            h,
+            imgW,
+            imgH)
+  end
+
+  if bestPath then os.remove(bestPath) end
+  return inputPath,
+      string.format("crop-fallback full-page scores=[%s] sx=%.5f sy=%.5f rect=%d,%d,%d,%d img=%dx%d",
+          table.concat(scores, ","),
+          sx,
+          sy,
+          x,
+          y,
+          w,
+          h,
+          imgW,
+          imgH)
+end
+
+local function renderSelectionAsBase64Png(settings, payload)
+  -- Preferred path: render selected data directly, so selected overlay content is always included.
+  local selB64, selPng, selErr = renderSelectionDataAsBase64Png(settings, payload)
+  if selB64 then
+    return selB64, selPng, "selection-svg-rasterized"
+  end
+
+  -- Fallback path: export page and crop selection bounds.
+  local pagePath = os.tmpname() .. "_llm_page.png"
+  local cropPath = os.tmpname() .. "_llm_sel.png"
+
   local exportOpts = {
-    outputFile = tmpPath,
-    range = tostring(pageNo),
+    outputFile = pagePath,
+    range = tostring(payload.context.currentPage or 1),
     background = "all",
     pngWidth = settings.selectionImageWidth
   }
 
   local ok, exportErr = pcall(app.export, exportOpts)
   if not ok then
-    os.remove(tmpPath)
-    return nil, "Failed to export page image for LLM request: " .. tostring(exportErr)
+    os.remove(pagePath)
+    os.remove(cropPath)
+    return nil, nil, "Failed to export page image: " .. tostring(exportErr) ..
+      " (selection-svg render error: " .. tostring(selErr or "unknown") .. ")"
   end
 
-  local pngData = readAll(tmpPath)
-  os.remove(tmpPath)
+  local finalPath, cropErr = cropSelectionImageIfPossible(pagePath, cropPath, payload, settings)
+  local pngData = readAll(finalPath)
+
+  os.remove(pagePath)
+  if finalPath ~= cropPath then
+    os.remove(cropPath)
+  end
+
   if not pngData or pngData == "" then
-    return nil, "Failed to read exported page image for LLM request."
+    if finalPath == cropPath then
+      os.remove(cropPath)
+    end
+    return nil, nil, "Failed to read selection raster image."
   end
 
-  return encodeBase64(pngData)
+  if finalPath == cropPath then
+    os.remove(cropPath)
+  end
+
+  local warning = "selection-svg render fallback: " .. tostring(selErr or "unknown") .. "; " .. tostring(cropErr or "")
+  return encodeBase64(pngData), pngData, warning
+end
+
+local function persistDebugFile(filename, content)
+  local base = app.getFolder("config")
+  if not base or base == "" then
+    return nil
+  end
+
+  local path = base .. "/" .. filename
+  if writeAll(path, content or "") then
+    return path
+  end
+
+  return nil
+end
+
+local function saveDebugSnapshot(endpoint, body, raw, curlErr, httpCode, exitCode, debugParts)
+  local requestPath = persistDebugFile("llm_latex_last_request.json", body or "")
+  local responsePath = persistDebugFile("llm_latex_last_response.txt", raw or "")
+
+  if debugParts then
+    persistDebugFile("llm_latex_last_user_content.txt", debugParts.userContent or "")
+    persistDebugFile("llm_latex_last_selection_bounds.json", debugParts.selectionBounds or "")
+    if debugParts.selectionImageData then
+      persistDebugFile("llm_latex_last_selection_image.png", debugParts.selectionImageData)
+    end
+  end
+
+  local meta = table.concat({
+    "timestamp=" .. os.date("%Y-%m-%d %H:%M:%S"),
+    "endpoint=" .. tostring(endpoint or ""),
+    "curl_exit=" .. tostring(exitCode or ""),
+    "http_status=" .. tostring(httpCode or ""),
+    "curl_stderr=" .. tostring(curlErr or ""),
+    "selection_crop_warning=" .. tostring((debugParts and debugParts.selectionCropWarning) or "")
+  }, "\n")
+  local metaPath = persistDebugFile("llm_latex_last_debug.txt", meta)
+
+  return requestPath, responsePath, metaPath
+end
+
+local function showDebugSnapshotDialog(requestPath, responsePath, metaPath, body, raw)
+  local msg = table.concat({
+    "LLM debug snapshot saved.",
+    "",
+    "Request JSON:",
+    tostring(requestPath or "(failed to write)"),
+    "",
+    "Response text:",
+    tostring(responsePath or "(failed to write)"),
+    "",
+    "Request/response metadata:",
+    tostring(metaPath or "(failed to write)"),
+    "",
+    "Request preview:",
+    truncateForDialog(body or "", MAX_DEBUG_PREVIEW_CHARS),
+    "",
+    "Response preview:",
+    truncateForDialog(raw or "", MAX_DEBUG_PREVIEW_CHARS)
+  }, "\n")
+
+  app.openDialog(msg, {"OK"}, "", false)
 end
 
 local function buildCurlCommand(settings, bodyPath, outPath, httpPath, errPath, statusPath)
@@ -645,14 +1140,30 @@ local function buildCurlPreview(settings, body)
   return truncateForDialog(table.concat(parts, " "), MAX_CURL_DIALOG_CHARS)
 end
 
-local function requestLatex(settings, payload, selectionImageBase64)
+local function requestLatex(settings, payload, promptText)
   local bodyPath = os.tmpname()
   local outPath = os.tmpname()
   local httpPath = os.tmpname()
   local errPath = os.tmpname()
   local statusPath = os.tmpname()
 
-  local requestPayload = buildApiRequest(settings, payload, selectionImageBase64)
+  local selectionImageBase64 = nil
+  local selectionImageData = nil
+  local selectionCropWarning = nil
+  if settings.apiType == "ollama" then
+    local imageErr
+    selectionImageBase64, selectionImageData, imageErr = renderSelectionAsBase64Png(settings, payload)
+    if not selectionImageBase64 then
+      return nil, imageErr or "Failed to rasterize current selection for model request."
+    end
+    selectionCropWarning = imageErr
+  end
+
+  local requestPayload, debugParts = buildApiRequest(settings, payload, promptText, selectionImageBase64)
+  if debugParts then
+    debugParts.selectionImageData = selectionImageData
+    debugParts.selectionCropWarning = selectionCropWarning
+  end
   local body = encodeJson(requestPayload)
   if #body > MAX_REQUEST_BODY_CHARS then
     return nil, "Payload too large; reduce selection size."
@@ -676,6 +1187,10 @@ local function requestLatex(settings, payload, selectionImageBase64)
   local httpCode = tonumber(httpCodeText) or 0
   local curlErr = trim(readAll(errPath) or "")
   local raw = readAll(outPath) or ""
+
+  local requestPath, responsePath, metaPath =
+      saveDebugSnapshot(requestSettings.endpoint, body, raw, curlErr, httpCode, code, debugParts)
+  showDebugSnapshotDialog(requestPath, responsePath, metaPath, body, raw)
 
   os.remove(bodyPath)
   os.remove(outPath)
@@ -754,7 +1269,7 @@ function initUi()
   app.registerUi({
     ["menu"] = MENU_NAME,
     ["callback"] = "runLlmLatexMvp",
-    ["accelerator"] = "<Shift><Alt>l"
+    ["accelerator"] = "<Alt>a"
   })
 end
 
@@ -783,19 +1298,7 @@ function runLlmLatexMvp()
     return
   end
 
-  payload.context.prompt = promptText
-
-  local selectionImageBase64 = nil
-  if settings.apiType == "ollama" then
-    local imageErr
-    selectionImageBase64, imageErr = renderCurrentPageAsBase64Png(settings, payload)
-    if not selectionImageBase64 then
-      showError(imageErr)
-      return
-    end
-  end
-
-  local latex, err = requestLatex(settings, payload, selectionImageBase64)
+  local latex, err = requestLatex(settings, payload, promptText)
   if not latex then
     showError(err)
     return
