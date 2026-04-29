@@ -10,8 +10,6 @@ local TOOLBAR_ICON_NAME = "xopp-tool-math-tex"
 local DEFAULT_PROMPT_FILENAME = "prompt-default.txt"
 local DEFAULT_API_TYPE = "openai"
 local DEFAULT_SELECTION_IMAGE_WIDTH = 2200
-local DEFAULT_SELECTION_CROP_PADDING = 8
-local DEFAULT_FAST_CROP = true
 local DEFAULT_SHOW_DEBUG_DIALOGS = false
 
 local DEFAULT_TIMEOUT_SEC = 15
@@ -262,26 +260,17 @@ local function resolveSettings()
   local promptFile = os.getenv("XOJ_LLM_LATEX_PROMPT_FILE") or cfg.prompt_file or DEFAULT_PROMPT_FILENAME
   local imageWidthRaw =
       os.getenv("XOJ_LLM_LATEX_SELECTION_IMAGE_WIDTH") or cfg.selection_image_width or tostring(DEFAULT_SELECTION_IMAGE_WIDTH)
-  local cropPaddingRaw =
-      os.getenv("XOJ_LLM_LATEX_SELECTION_CROP_PADDING") or cfg.selection_crop_padding or tostring(DEFAULT_SELECTION_CROP_PADDING)
-  local fastCropRaw =
-      os.getenv("XOJ_LLM_LATEX_FAST_CROP") or cfg.fast_crop
-    local showDebugDialogsRaw =
+  local showDebugDialogsRaw =
       os.getenv("XOJ_LLM_LATEX_SHOW_DEBUG_DIALOGS") or cfg.show_debug_dialogs
   local timeoutRaw = os.getenv("XOJ_LLM_LATEX_TIMEOUT_SEC") or cfg.timeout_sec or tostring(DEFAULT_TIMEOUT_SEC)
   local timeoutSec = tonumber(timeoutRaw) or DEFAULT_TIMEOUT_SEC
   local selectionImageWidth = tonumber(imageWidthRaw) or DEFAULT_SELECTION_IMAGE_WIDTH
-  local selectionCropPadding = tonumber(cropPaddingRaw) or DEFAULT_SELECTION_CROP_PADDING
-  local fastCrop = parseBool(fastCropRaw, DEFAULT_FAST_CROP)
-    local showDebugDialogs = parseBool(showDebugDialogsRaw, DEFAULT_SHOW_DEBUG_DIALOGS)
+  local showDebugDialogs = parseBool(showDebugDialogsRaw, DEFAULT_SHOW_DEBUG_DIALOGS)
   if timeoutSec < 2 then
     timeoutSec = 2
   end
   if selectionImageWidth < 600 then
     selectionImageWidth = 600
-  end
-  if selectionCropPadding < 0 then
-    selectionCropPadding = 0
   end
 
   local promptPath = trim(promptFile)
@@ -304,8 +293,6 @@ local function resolveSettings()
     model = trim(model),
     promptPath = promptPath,
     selectionImageWidth = math.floor(selectionImageWidth),
-    selectionCropPadding = selectionCropPadding,
-    fastCrop = fastCrop,
     showDebugDialogs = showDebugDialogs,
     timeoutSec = math.floor(timeoutSec)
   }
@@ -649,13 +636,7 @@ end
 local function buildApiRequest(settings, payload, promptText, selectionImageBase64)
   local boundsJson = encodeJson(payload.context.selectionBounds or {})
 
-  local userContent = table.concat({
-    "Transcribe the selected handwritten math into LaTeX.",
-    latexInstruction(),
-    "The attached image is cropped to the current selection.",
-    "Selection bounds (document units):",
-    boundsJson
-  }, "\n\n")
+  local userContent = "Convert the attached selection image into LaTeX."
 
   if settings.apiType == "ollama" then
     return {
@@ -796,65 +777,34 @@ local function fileSize(path)
   return sz
 end
 
-local CROP_COMMAND_CACHE = nil
+local IMAGE_TOOL_COMMAND_CACHE = nil
 
-local function findCropCommand()
-  if CROP_COMMAND_CACHE ~= nil then
-    return CROP_COMMAND_CACHE
+local function findImageToolCommand()
+  if IMAGE_TOOL_COMMAND_CACHE ~= nil then
+    return IMAGE_TOOL_COMMAND_CACHE
   end
 
   if commandSucceeded(os.execute("command -v magick >/dev/null 2>&1")) then
-    CROP_COMMAND_CACHE = "magick"
-    return CROP_COMMAND_CACHE
+    IMAGE_TOOL_COMMAND_CACHE = "magick"
+    return IMAGE_TOOL_COMMAND_CACHE
   end
   if commandSucceeded(os.execute("command -v convert >/dev/null 2>&1")) then
-    CROP_COMMAND_CACHE = "convert"
-    return CROP_COMMAND_CACHE
+    IMAGE_TOOL_COMMAND_CACHE = "convert"
+    return IMAGE_TOOL_COMMAND_CACHE
   end
 
-  CROP_COMMAND_CACHE = false
+  IMAGE_TOOL_COMMAND_CACHE = false
   return nil
 end
 
-local function imageStdDev(path)
-  if not fileExists(path) then
-    return 0
-  end
-
-  local cropTool = findCropCommand() or "magick"
-
-  local statsPath = os.tmpname()
-  local cmd = table.concat({
-    cropTool,
-    shellQuote(path),
-    "-colorspace",
-    "Gray",
-    "-format",
-    shellQuote("%[fx:standard_deviation]"),
-    "info:",
-    ">",
-    shellQuote(statsPath),
-    "2>/dev/null"
-  }, " ")
-
-  if not commandSucceeded(os.execute(cmd)) then
-    os.remove(statsPath)
-    return 0
-  end
-
-  local v = tonumber(trim(readAll(statsPath) or "")) or 0
-  os.remove(statsPath)
-  return v
-end
-
 local function renderSvgFileToPng(svgPath, pngPath, targetWidth)
-  local cropTool = findCropCommand()
-  if not cropTool then
+  local imageTool = findImageToolCommand()
+  if not imageTool then
     return false, "No image render tool found (magick/convert)."
   end
 
   local cmd = table.concat({
-    cropTool,
+    imageTool,
     "-density",
     "300",
     "-background",
@@ -929,192 +879,9 @@ local function renderSelectionDataAsBase64Png(settings, payload, timing)
   return encoded, pngData
 end
 
-local function getImageDimensions(path)
-  if not fileExists(path) then
-    return nil, nil
-  end
-
-  local cropTool = findCropCommand() or "magick"
-  local outPath = os.tmpname()
-  local cmd = table.concat({
-    cropTool,
-    shellQuote(path),
-    "-format",
-    shellQuote("%w %h"),
-    "info:",
-    ">",
-    shellQuote(outPath),
-    "2>/dev/null"
-  }, " ")
-
-  if not commandSucceeded(os.execute(cmd)) then
-    os.remove(outPath)
-    return nil, nil
-  end
-
-  local txt = trim(readAll(outPath) or "")
-  os.remove(outPath)
-  local w, h = txt:match("^(%d+)%s+(%d+)$")
-  return tonumber(w), tonumber(h)
-end
-
-local function cropToRect(cropTool, inputPath, outputPath, x, y, w, h)
-  local cmd = table.concat({
-    cropTool,
-    shellQuote(inputPath),
-    "-crop",
-    string.format("%dx%d+%d+%d", w, h, x, y),
-    "+repage",
-    shellQuote(outputPath),
-    ">/dev/null 2>&1"
-  }, " ")
-
-  if commandSucceeded(os.execute(cmd)) and fileExists(outputPath) and fileSize(outputPath) > 0 then
-    return true
-  end
-  return false
-end
-
-local function cropSelectionImageIfPossible(inputPath, outputPath, payload, settings, timing)
-  local stepStart = monotonicMs()
-  local pageWidth = tonumber(payload.context.pageWidth)
-  local pageHeight = tonumber(payload.context.pageHeight)
-  if not pageWidth or not pageHeight or pageWidth <= 0 or pageHeight <= 0 then
-    return inputPath, "Missing page dimensions for selection crop."
-  end
-
-  local bx, by, bw, bh = getSelectionFrame(payload)
-  if not bx or not by or not bw or not bh or bw <= 0 or bh <= 0 then
-    return inputPath, "Missing selection bounds for selection crop."
-  end
-
-  local imgW, imgH = getImageDimensions(inputPath)
-  if timing then
-    timing.crop_get_dimensions_ms = elapsedMs(stepStart)
-  end
-  if not imgW or not imgH or imgW <= 0 or imgH <= 0 then
-    return inputPath, "Could not read exported image dimensions for selection crop."
-  end
-
-  local sx = imgW / pageWidth
-  local sy = imgH / pageHeight
-  local pad = tonumber(settings.selectionCropPadding) or 0
-
-  local x = math.floor((bx - pad) * sx)
-  local y = math.floor((by - pad) * sy)
-  local w = math.ceil((bw + pad * 2) * sx)
-  local h = math.ceil((bh + pad * 2) * sy)
-
-  if x < 0 then x = 0 end
-  if y < 0 then y = 0 end
-  if x >= imgW then x = imgW - 1 end
-  if y >= imgH then y = imgH - 1 end
-  if x + w > imgW then w = imgW - x end
-  if y + h > imgH then h = imgH - y end
-  w = math.max(1, w)
-  h = math.max(1, h)
-
-  local cropTool = findCropCommand()
-  if not cropTool then
-    return inputPath, "No image crop tool found (magick/convert)."
-  end
-
-  local xFlip = imgW - (x + w)
-  local yFlip = imgH - (y + h)
-  if xFlip < 0 then xFlip = 0 end
-  if yFlip < 0 then yFlip = 0 end
-  if xFlip + w > imgW then xFlip = math.max(0, imgW - w) end
-  if yFlip + h > imgH then yFlip = math.max(0, imgH - h) end
-
-  local candidates = {
-    {name = "xy", x = x, y = y},
-    {name = "xY", x = x, y = yFlip},
-    {name = "Xy", x = xFlip, y = y},
-    {name = "XY", x = xFlip, y = yFlip}
-  }
-
-  if settings.fastCrop then
-    local fastStart = monotonicMs()
-    local fastPath = os.tmpname() .. "_crop_xy_fast.png"
-    local fastOk = cropToRect(cropTool, inputPath, fastPath, x, y, w, h)
-    if timing then
-      timing.crop_fast_xy_ms = elapsedMs(fastStart)
-    end
-    if fastOk and fileExists(fastPath) then
-      os.remove(outputPath)
-      os.rename(fastPath, outputPath)
-      return outputPath,
-          string.format("crop=xy fast sx=%.5f sy=%.5f rect=%d,%d,%d,%d img=%dx%d",
-              sx,
-              sy,
-              x,
-              y,
-              w,
-              h,
-              imgW,
-              imgH)
-    end
-    os.remove(fastPath)
-  end
-
-  local bestPath = nil
-  local bestScore = -1
-  local bestName = ""
-  local scores = {}
-  local loopStart = monotonicMs()
-  for _, c in ipairs(candidates) do
-    local p = os.tmpname() .. "_crop_" .. c.name .. ".png"
-    local ok = cropToRect(cropTool, inputPath, p, c.x, c.y, w, h)
-    local s = ok and imageStdDev(p) or 0
-    scores[#scores + 1] = c.name .. ":" .. string.format("%.6f", s)
-    if ok and s > bestScore and fileExists(p) then
-      if bestPath and bestPath ~= p then os.remove(bestPath) end
-      bestPath = p
-      bestScore = s
-      bestName = c.name
-    else
-      os.remove(p)
-    end
-  end
-  if timing then
-    timing.crop_heuristic_ms = elapsedMs(loopStart)
-  end
-
-  if bestPath and bestScore > 0 then
-    os.remove(outputPath)
-    os.rename(bestPath, outputPath)
-    return outputPath,
-        string.format("crop=%s stddev=%.6f scores=[%s] sx=%.5f sy=%.5f rect=%d,%d,%d,%d img=%dx%d",
-            bestName,
-            bestScore,
-            table.concat(scores, ","),
-            sx,
-            sy,
-            x,
-            y,
-            w,
-            h,
-            imgW,
-            imgH)
-  end
-
-  if bestPath then os.remove(bestPath) end
-  return inputPath,
-      string.format("crop-fallback full-page scores=[%s] sx=%.5f sy=%.5f rect=%d,%d,%d,%d img=%dx%d",
-          table.concat(scores, ","),
-          sx,
-          sy,
-          x,
-          y,
-          w,
-          h,
-          imgW,
-          imgH)
-end
-
 local function renderSelectionAsBase64Png(settings, payload, timing)
   local totalStart = monotonicMs()
-  -- Preferred path: render selected data directly, so selected overlay content is always included.
+  -- Render selected data directly and do not fall back to page export/cropping.
   local selB64, selPng, selErr = renderSelectionDataAsBase64Png(settings, payload, timing)
   if selB64 then
     if timing then
@@ -1123,70 +890,11 @@ local function renderSelectionAsBase64Png(settings, payload, timing)
     end
     return selB64, selPng, "selection-svg-rasterized"
   end
-
-  -- Fallback path: export page and crop selection bounds.
-  local pagePath = os.tmpname() .. "_llm_page.png"
-  local cropPath = os.tmpname() .. "_llm_sel.png"
-
-  local exportOpts = {
-    outputFile = pagePath,
-    range = tostring(payload.context.currentPage or 1),
-    background = "all",
-    pngWidth = settings.selectionImageWidth
-  }
-
-  local stepStart = monotonicMs()
-  local ok, exportErr = pcall(app.export, exportOpts)
   if timing then
-    timing.render_path = "page-export-fallback"
-    timing.export_page_ms = elapsedMs(stepStart)
-  end
-  if not ok then
-    os.remove(pagePath)
-    os.remove(cropPath)
-    return nil, nil, "Failed to export page image: " .. tostring(exportErr) ..
-      " (selection-svg render error: " .. tostring(selErr or "unknown") .. ")"
-  end
-
-  local cropStart = monotonicMs()
-  local finalPath, cropErr = cropSelectionImageIfPossible(pagePath, cropPath, payload, settings, timing)
-  if timing then
-    timing.crop_total_ms = elapsedMs(cropStart)
-  end
-
-  local readStart = monotonicMs()
-  local pngData = readAll(finalPath)
-  if timing then
-    timing.fallback_png_read_ms = elapsedMs(readStart)
-  end
-
-  os.remove(pagePath)
-  if finalPath ~= cropPath then
-    os.remove(cropPath)
-  end
-
-  if not pngData or pngData == "" then
-    if finalPath == cropPath then
-      os.remove(cropPath)
-    end
-    return nil, nil, "Failed to read selection raster image."
-  end
-
-  if finalPath == cropPath then
-    os.remove(cropPath)
-  end
-
-  local b64Start = monotonicMs()
-  local encoded = encodeBase64(pngData)
-  if timing then
-    timing.base64_encode_ms = elapsedMs(b64Start)
-    timing.selection_png_bytes = #pngData
-    timing.selection_b64_chars = #encoded
+    timing.render_path = "selection-svg-only"
     timing.raster_total_ms = elapsedMs(totalStart)
   end
-
-  local warning = "selection-svg render fallback: " .. tostring(selErr or "unknown") .. "; " .. tostring(cropErr or "")
-  return encoded, pngData, warning
+  return nil, nil, "Failed to rasterize selected content: " .. tostring(selErr or "unknown")
 end
 
 local function persistDebugFile(filename, content)
@@ -1205,7 +913,7 @@ end
 
 local function saveDebugSnapshot(endpoint, body, raw, curlErr, httpCode, exitCode, debugParts)
   local requestPath = persistDebugFile("llm_latex_last_request.json", body or "")
-  local responsePath = persistDebugFile("llm_latex_last_response.txt", raw or "")
+  local responsePath = persistDebugFile("llm_latex_last_response.json", raw or "")
 
   if debugParts then
     persistDebugFile("llm_latex_last_user_content.txt", debugParts.userContent or "")
@@ -1464,6 +1172,165 @@ local function showError(msg)
   app.openDialog(msg, {"Ok"}, "", true)
 end
 
+local function userConfigPath()
+  return app.getFolder("config") .. "/" .. CONFIG_FILENAME
+end
+
+local function pluginConfigPath()
+  return pluginDir() .. "/" .. CONFIG_FILENAME
+end
+
+local function serializeSettings(settings)
+  local lines = {
+    "api_type=" .. tostring(settings.apiType or ""),
+    "endpoint=" .. tostring(settings.endpoint or ""),
+    "api_key=" .. (settings.apiKey ~= "" and "<set>" or ""),
+    "model=" .. tostring(settings.model or ""),
+    "prompt_file=" .. tostring(settings.promptPath or ""),
+    "selection_image_width=" .. tostring(settings.selectionImageWidth or ""),
+    "timeout_sec=" .. tostring(settings.timeoutSec or ""),
+    "show_debug_dialogs=" .. tostring(settings.showDebugDialogs)
+  }
+  return table.concat(lines, "\n")
+end
+
+local function defaultUserConfigTemplate()
+  local template = readAll(pluginConfigPath())
+  if template and trim(template) ~= "" then
+    return template
+  end
+
+  return table.concat({
+    "# LLM to LaTeX user configuration",
+    "api_type=openai",
+    "endpoint=",
+    "api_key=",
+    "model=",
+    "prompt_file=" .. DEFAULT_PROMPT_FILENAME,
+    "selection_image_width=" .. tostring(DEFAULT_SELECTION_IMAGE_WIDTH),
+    "timeout_sec=" .. tostring(DEFAULT_TIMEOUT_SEC),
+    "show_debug_dialogs=false",
+    ""
+  }, "\n")
+end
+
+local function ensureUserConfigFile()
+  local path = userConfigPath()
+  if fileExists(path) then
+    return path
+  end
+
+  local template = defaultUserConfigTemplate()
+  if not writeAll(path, template) then
+    return nil
+  end
+  return path
+end
+
+local function launchConfigEditor(path)
+  local editor = trim(os.getenv("XOJ_LLM_LATEX_EDITOR") or os.getenv("VISUAL") or os.getenv("EDITOR") or "")
+
+  if editor ~= "" then
+    local cmd = editor .. " " .. shellQuote(path) .. " >/dev/null 2>&1 &"
+    if commandSucceeded(os.execute(cmd)) then
+      return true, "Opened config file with editor from environment variables."
+    end
+  end
+
+  if commandSucceeded(os.execute("command -v xdg-open >/dev/null 2>&1")) then
+    local cmd = "xdg-open " .. shellQuote(path) .. " >/dev/null 2>&1 &"
+    if commandSucceeded(os.execute(cmd)) then
+      return true, "Opened config file via xdg-open."
+    end
+  end
+
+  return false, "Could not launch editor automatically."
+end
+
+local function showConfigDialogMessage()
+  local path = userConfigPath()
+  local exists = fileExists(path)
+  local status = exists and "present" or "missing (will be created from plugin defaults)"
+  local msg = table.concat({
+    "LLM to LaTeX config",
+    "",
+    "User config file:",
+    path,
+    "Status: " .. status,
+    "",
+    "Choose an action:"
+  }, "\n")
+  app.openDialog(msg, {"Open Config", "Show Effective Settings", "Reset User Config", "Cancel"}, "llmLatexConfigDialogChoice")
+end
+
+local function showEffectiveSettingsDialog()
+  local settings = resolveSettings()
+  local msg = table.concat({
+    "Effective LLM to LaTeX settings",
+    "(environment variables override file values)",
+    "",
+    serializeSettings(settings)
+  }, "\n")
+  app.openDialog(msg, {"OK"}, "", false)
+end
+
+local function resetUserConfigFile()
+  local path = userConfigPath()
+  local template = defaultUserConfigTemplate()
+  if not writeAll(path, template) then
+    app.openDialog("Failed to write user config file:\n" .. path, {"OK"}, "", true)
+    return
+  end
+  app.openDialog("User config reset to defaults:\n" .. path, {"OK"}, "", false)
+end
+
+function openLlmLatexConfigDialog()
+  showConfigDialogMessage()
+end
+
+function llmLatexConfigDialogChoice(result)
+  if result == 1 then
+    local path = ensureUserConfigFile()
+    if not path then
+      app.openDialog("Failed to create user config file in:\n" .. app.getFolder("config"), {"OK"}, "", true)
+      return
+    end
+
+    local ok, info = launchConfigEditor(path)
+    if ok then
+      app.openDialog(info .. "\n\nFile:\n" .. path, {"OK"}, "", false)
+    else
+      app.openDialog(
+        info .. "\n\nPlease open this file manually:\n" .. path,
+        {"OK"},
+        "",
+        true
+      )
+    end
+    return
+  end
+
+  if result == 2 then
+    showEffectiveSettingsDialog()
+    return
+  end
+
+  if result == 3 then
+    app.openDialog(
+      "Reset user config to plugin defaults?\nThis overwrites existing values in:\n" .. userConfigPath(),
+      {"Cancel", "Reset"},
+      "llmLatexResetConfigConfirm"
+    )
+    return
+  end
+end
+
+function llmLatexResetConfigConfirm(result)
+  if result == 2 then
+    resetUserConfigFile()
+  end
+end
+
 function initUi()
   app.registerUi({
     ["menu"] = MENU_NAME,
@@ -1471,6 +1338,11 @@ function initUi()
     ["toolbarId"] = TOOLBAR_ID,
     ["iconName"] = TOOLBAR_ICON_NAME,
     ["accelerator"] = "<Alt>a"
+  })
+
+  app.registerUi({
+    ["menu"] = "LLM to LaTeX: Edit Config",
+    ["callback"] = "openLlmLatexConfigDialog"
   })
 end
 
