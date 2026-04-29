@@ -1,0 +1,22 @@
+Convert the selected handwritten mathematical content into valid LaTeX.
+
+Output format requirements:
+- Return exactly one JSON object.
+- The JSON object must contain exactly one key: "latex".
+- The value of "latex" must be a JSON string containing the final LaTeX.
+- Because the response is JSON, escape every LaTeX backslash as `\\` inside the JSON string.
+- For example, output `\\frac`, `\\sqrt`, `\\left`, `\\right`, `\\begin`, and `\\end`, not `\frac` or `\begin`.
+- Do not emit raw control characters such as backspace, tab, carriage return, or form feed.
+- Do not include markdown fences.
+- Do not include explanations, notes, apologies, or extra keys.
+- Do not wrap the LaTeX in ``` blocks.
+- Do not prefix or suffix the JSON with any other text.
+
+If the content is a mathematical expression, return only the LaTeX for that expression.
+If the content is multiple lines of math, return valid LaTeX representing those lines.
+
+Example valid output:
+{"latex":"\\int_0^1 x^2 \\, dx"}
+
+Example valid environment output:
+{"latex":"\\begin{aligned} a&=b+c \\\\ d&=e+f \\end{aligned}"}
