@@ -11,7 +11,10 @@ local TOOLBAR_ICON_NAME = "xopp-tool-math-tex"
 local DEFAULT_PROMPT_FILENAME = "prompt-default.txt"
 local DEFAULT_API_TYPE = "openai"
 local DEFAULT_SELECTION_IMAGE_WIDTH = 2200
+local DEFAULT_SELECTION_IMAGE_DENSITY = 300
 local DEFAULT_SHOW_DEBUG_DIALOGS = false
+local DEFAULT_SHOW_INSERT_DEBUG_DIALOGS = false
+local DEFAULT_MATCH_SELECTION_COLOR = true
 
 local DEFAULT_TIMEOUT_SEC = 15
 local MAX_STROKES = 50
@@ -261,17 +264,31 @@ local function resolveSettings()
   local promptFile = os.getenv("XOJ_LLM_LATEX_PROMPT_FILE") or cfg.prompt_file or DEFAULT_PROMPT_FILENAME
   local imageWidthRaw =
       os.getenv("XOJ_LLM_LATEX_SELECTION_IMAGE_WIDTH") or cfg.selection_image_width or tostring(DEFAULT_SELECTION_IMAGE_WIDTH)
+    local imageDensityRaw =
+      os.getenv("XOJ_LLM_LATEX_SELECTION_IMAGE_DENSITY") or cfg.selection_image_density or tostring(DEFAULT_SELECTION_IMAGE_DENSITY)
   local showDebugDialogsRaw =
       os.getenv("XOJ_LLM_LATEX_SHOW_DEBUG_DIALOGS") or cfg.show_debug_dialogs
+  local showInsertDebugDialogsRaw =
+      os.getenv("XOJ_LLM_LATEX_SHOW_INSERT_DEBUG_DIALOGS") or cfg.show_insert_debug_dialogs
+    local matchSelectionColorRaw =
+      os.getenv("XOJ_LLM_LATEX_MATCH_SELECTION_COLOR") or cfg.match_selection_color
   local timeoutRaw = os.getenv("XOJ_LLM_LATEX_TIMEOUT_SEC") or cfg.timeout_sec or tostring(DEFAULT_TIMEOUT_SEC)
   local timeoutSec = tonumber(timeoutRaw) or DEFAULT_TIMEOUT_SEC
   local selectionImageWidth = tonumber(imageWidthRaw) or DEFAULT_SELECTION_IMAGE_WIDTH
+    local selectionImageDensity = tonumber(imageDensityRaw) or DEFAULT_SELECTION_IMAGE_DENSITY
   local showDebugDialogs = parseBool(showDebugDialogsRaw, DEFAULT_SHOW_DEBUG_DIALOGS)
+  local showInsertDebugDialogs = parseBool(showInsertDebugDialogsRaw, DEFAULT_SHOW_INSERT_DEBUG_DIALOGS)
+  local matchSelectionColor = parseBool(matchSelectionColorRaw, DEFAULT_MATCH_SELECTION_COLOR)
   if timeoutSec < 2 then
     timeoutSec = 2
   end
   if selectionImageWidth < 600 then
     selectionImageWidth = 600
+  end
+  if selectionImageDensity < 72 then
+    selectionImageDensity = 72
+  elseif selectionImageDensity > 1200 then
+    selectionImageDensity = 1200
   end
 
   local promptPath = trim(promptFile)
@@ -294,7 +311,10 @@ local function resolveSettings()
     model = trim(model),
     promptPath = promptPath,
     selectionImageWidth = math.floor(selectionImageWidth),
+    selectionImageDensity = math.floor(selectionImageDensity),
     showDebugDialogs = showDebugDialogs,
+    showInsertDebugDialogs = showInsertDebugDialogs,
+    matchSelectionColor = matchSelectionColor,
     timeoutSec = math.floor(timeoutSec)
   }
 end
@@ -798,16 +818,18 @@ local function findImageToolCommand()
   return nil
 end
 
-local function renderSvgFileToPng(svgPath, pngPath, targetWidth)
+local function renderSvgFileToPng(svgPath, pngPath, targetWidth, targetDensity)
   local imageTool = findImageToolCommand()
   if not imageTool then
     return false, "No image render tool found (magick/convert)."
   end
 
+  local density = math.max(72, math.min(1200, math.floor(targetDensity or DEFAULT_SELECTION_IMAGE_DENSITY)))
+
   local cmd = table.concat({
     imageTool,
     "-density",
-    "300",
+    tostring(density),
     "-background",
     "white",
     shellQuote(svgPath),
@@ -846,9 +868,16 @@ local function renderSelectionDataAsBase64Png(settings, payload, timing)
   end
 
   stepStart = monotonicMs()
-  local ok, renderErr = renderSvgFileToPng(svgPath, pngPath, settings.selectionImageWidth)
+  local ok, renderErr = renderSvgFileToPng(
+    svgPath,
+    pngPath,
+    settings.selectionImageWidth,
+    settings.selectionImageDensity
+  )
   if timing then
     timing.svg_render_ms = elapsedMs(stepStart)
+    timing.selection_target_width = tostring(settings.selectionImageWidth or "")
+    timing.selection_target_density = tostring(settings.selectionImageDensity or "")
   end
   os.remove(svgPath)
   if not ok then
@@ -1142,15 +1171,112 @@ local function pickInsertPosition(selectionInfo)
   return 40, 40
 end
 
-local function insertLatex(latex, selectionInfo)
-  local x, y = pickInsertPosition(selectionInfo)
-  local width = nil
-  local height = nil
-  if selectionInfo and selectionInfo.boundingBox then
-    width = tonumber(selectionInfo.boundingBox.width)
-    height = tonumber(selectionInfo.boundingBox.height)
+local function getValidBounds(bounds)
+  if type(bounds) ~= "table" then
+    return nil
   end
-  local opts = {
+  local x = tonumber(bounds.x)
+  local y = tonumber(bounds.y)
+  local width = tonumber(bounds.width)
+  local height = tonumber(bounds.height)
+  if x and y and width and height and width > 0 and height > 0 then
+    return {
+      x = x,
+      y = y,
+      width = width,
+      height = height
+    }
+  end
+  return nil
+end
+
+local function resolveInsertBounds(selectionInfo, payload)
+  -- Prefer snapped/original bounds because UI boundingBox includes selection padding.
+  local candidates = {
+    payload and payload.context and payload.context.selectionBounds,
+    selectionInfo and selectionInfo.snappedBounds,
+    selectionInfo and selectionInfo.originalBounds,
+    selectionInfo and selectionInfo.boundingBox
+  }
+
+  for _, bounds in ipairs(candidates) do
+    local valid = getValidBounds(bounds)
+    if valid then
+      return valid
+    end
+  end
+
+  return nil
+end
+
+local function formatDebugNumber(value)
+  local n = tonumber(value)
+  if not n then
+    return "nil"
+  end
+  return string.format("%.2f", n)
+end
+
+local function collectInsertLatexDebug(latex, selectionInfo, x, y, width, height, targetWidth, targetHeight, refs)
+  local inputBox = (selectionInfo and selectionInfo.boundingBox) or {}
+  local insertedInfo = safeCall(app.getToolInfo, "selection") or {}
+  local insertedBox = insertedInfo.boundingBox or {}
+  local latexText = tostring(latex or "")
+  local _, newlineCount = latexText:gsub("\n", "\n")
+  local lineCount = (latexText ~= "") and (newlineCount + 1) or 0
+
+  local inW = tonumber(inputBox.width)
+  local inH = tonumber(inputBox.height)
+  local outW = tonumber(insertedBox.width)
+  local outH = tonumber(insertedBox.height)
+
+  local lines = {
+    "timestamp=" .. os.date("%Y-%m-%d %H:%M:%S"),
+    "latex_chars=" .. tostring(#latexText),
+    "latex_lines=" .. tostring(lineCount),
+    "selection_bbox_x=" .. formatDebugNumber(inputBox.x),
+    "selection_bbox_y=" .. formatDebugNumber(inputBox.y),
+    "selection_bbox_w=" .. formatDebugNumber(inW),
+    "selection_bbox_h=" .. formatDebugNumber(inH),
+    "insert_x=" .. formatDebugNumber(x),
+    "insert_y=" .. formatDebugNumber(y),
+    "target_width=" .. formatDebugNumber(targetWidth),
+    "target_height=" .. formatDebugNumber(targetHeight),
+    "requested_width=" .. formatDebugNumber(width),
+    "requested_height=" .. formatDebugNumber(height),
+    "inserted_bbox_x=" .. formatDebugNumber(insertedBox.x),
+    "inserted_bbox_y=" .. formatDebugNumber(insertedBox.y),
+    "inserted_bbox_w=" .. formatDebugNumber(outW),
+    "inserted_bbox_h=" .. formatDebugNumber(outH),
+    "added_refs=" .. tostring((refs and #refs) or 0)
+  }
+
+  if inW and inW > 0 and outW then
+    lines[#lines + 1] = string.format("width_scale=%.4f", outW / inW)
+  end
+  if inH and inH > 0 and outH then
+    lines[#lines + 1] = string.format("height_scale=%.4f", outH / inH)
+  end
+  if inW and inW > 0 and inH and inH > 0 and outW and outH then
+    lines[#lines + 1] = string.format("area_scale=%.4f", (outW * outH) / (inW * inH))
+  end
+
+  local debugText = table.concat(lines, "\n")
+  local debugPath = persistDebugFile("insert_latex_debug.txt", debugText)
+  return debugPath, insertedBox
+end
+
+local function deleteSelectionRefs(refs)
+  if not refs or #refs == 0 then
+    return
+  end
+  app.clearSelection()
+  app.addToSelection(refs)
+  app.activateAction("delete")
+end
+
+local function insertLatexItem(latex, x, y, width, height, undoMode)
+  return app.addLatex({
     latexItems = {
       {
         latex = latex,
@@ -1160,12 +1286,153 @@ local function insertLatex(latex, selectionInfo)
         height = height
       }
     },
-    allowUndoRedoAction = "grouped"
-  }
-  local refs = app.addLatex(opts)
+    allowUndoRedoAction = undoMode or "grouped"
+  })
+end
+
+local function chooseLatexInsertSize(latex, x, y, targetWidth, targetHeight)
+  if not targetWidth or not targetHeight or targetWidth <= 0 or targetHeight <= 0 then
+    return nil, nil
+  end
+
+  local probeRefs = insertLatexItem(latex, x, y, nil, nil, "none")
+  if not probeRefs or #probeRefs == 0 then
+    return targetWidth, nil
+  end
+
+  app.clearSelection()
+  app.addToSelection(probeRefs)
+  local probeInfo = safeCall(app.getToolInfo, "selection") or {}
+  local probeBox = probeInfo.boundingBox or {}
+  local probeW = tonumber(probeBox.width)
+  local probeH = tonumber(probeBox.height)
+  deleteSelectionRefs(probeRefs)
+
+  if not probeW or not probeH or probeW <= 0 or probeH <= 0 then
+    return targetWidth, nil
+  end
+
+  local probeAspect = probeW / probeH
+  local targetAspect = targetWidth / targetHeight
+  if probeAspect >= targetAspect then
+    return targetWidth, nil
+  end
+  return nil, targetHeight
+end
+
+local function dominantSelectionColor(payload)
+  if type(payload) ~= "table" or type(payload.selection) ~= "table" then
+    return nil
+  end
+
+  local counts = {}
+  local function addColor(color)
+    local c = tonumber(color)
+    if not c then
+      return
+    end
+    counts[c] = (counts[c] or 0) + 1
+  end
+
+  for _, s in ipairs(payload.selection.strokes or {}) do
+    addColor(s.color)
+  end
+  for _, t in ipairs(payload.selection.texts or {}) do
+    addColor(t.color)
+  end
+
+  local bestColor = nil
+  local bestCount = 0
+  for color, count in pairs(counts) do
+    if count > bestCount then
+      bestCount = count
+      bestColor = color
+    end
+  end
+
+  return bestColor
+end
+
+local function recolorCurrentSelection(color)
+  local targetColor = tonumber(color)
+  if not targetColor then
+    return nil
+  end
+
+  local activeToolInfo = safeCall(app.getToolInfo, "active") or {}
+  local originalToolColor = tonumber(activeToolInfo.color)
+
+  safeCall(app.changeToolColor, {
+    color = targetColor,
+    selection = true
+  })
+
+  if originalToolColor and originalToolColor ~= targetColor then
+    safeCall(app.changeToolColor, {
+      color = originalToolColor,
+      selection = false
+    })
+  end
+
+  return targetColor
+end
+
+local function insertLatex(latex, selectionInfo, settings, payload)
+  local insertBounds = resolveInsertBounds(selectionInfo, payload)
+  local x, y = pickInsertPosition(selectionInfo)
+  local targetWidth = nil
+  local targetHeight = nil
+  if insertBounds then
+    x = insertBounds.x
+    y = insertBounds.y
+    targetWidth = insertBounds.width
+    targetHeight = insertBounds.height
+  elseif selectionInfo and selectionInfo.boundingBox then
+    targetWidth = tonumber(selectionInfo.boundingBox.width)
+    targetHeight = tonumber(selectionInfo.boundingBox.height)
+  end
+
+  local width, height = chooseLatexInsertSize(latex, x, y, targetWidth, targetHeight)
+  if not width and not height and targetWidth and targetWidth > 0 then
+    width = targetWidth
+  end
+
+  local refs = insertLatexItem(latex, x, y, width, height, "grouped")
   if refs and #refs > 0 then
     app.clearSelection()
     app.addToSelection(refs)
+    if settings and settings.matchSelectionColor then
+      local selectionColor = dominantSelectionColor(payload)
+      recolorCurrentSelection(selectionColor)
+    end
+  end
+
+  local shouldShowInsertDebug = settings and settings.showInsertDebugDialogs
+  if shouldShowInsertDebug then
+    local debugPath, insertedBox = collectInsertLatexDebug(
+      latex,
+      selectionInfo,
+      x,
+      y,
+      width,
+      height,
+      targetWidth,
+      targetHeight,
+      refs
+    )
+    local msg = table.concat({
+      "Insert LaTeX sizing debug",
+      "",
+      "Requested box from source selection:",
+      "  width=" .. formatDebugNumber(width) .. ", height=" .. formatDebugNumber(height),
+      "",
+      "Inserted object bounding box:",
+      "  width=" .. formatDebugNumber(insertedBox.width) .. ", height=" .. formatDebugNumber(insertedBox.height),
+      "",
+      "Debug file:",
+      tostring(debugPath or "(failed to write)")
+    }, "\n")
+    app.openDialog(msg, {"OK"}, "", false)
   end
 end
 
@@ -1189,8 +1456,11 @@ local function serializeSettings(settings)
     "model=" .. tostring(settings.model or ""),
     "prompt_file=" .. tostring(settings.promptPath or ""),
     "selection_image_width=" .. tostring(settings.selectionImageWidth or ""),
+    "selection_image_density=" .. tostring(settings.selectionImageDensity or ""),
     "timeout_sec=" .. tostring(settings.timeoutSec or ""),
-    "show_debug_dialogs=" .. tostring(settings.showDebugDialogs)
+    "show_debug_dialogs=" .. tostring(settings.showDebugDialogs),
+    "show_insert_debug_dialogs=" .. tostring(settings.showInsertDebugDialogs),
+    "match_selection_color=" .. tostring(settings.matchSelectionColor)
   }
   return table.concat(lines, "\n")
 end
@@ -1209,8 +1479,11 @@ local function defaultUserConfigTemplate()
     "model=",
     "prompt_file=" .. DEFAULT_PROMPT_FILENAME,
     "selection_image_width=" .. tostring(DEFAULT_SELECTION_IMAGE_WIDTH),
+    "selection_image_density=" .. tostring(DEFAULT_SELECTION_IMAGE_DENSITY),
     "timeout_sec=" .. tostring(DEFAULT_TIMEOUT_SEC),
     "show_debug_dialogs=false",
+    "show_insert_debug_dialogs=false",
+    "match_selection_color=true",
     ""
   }, "\n")
 end
@@ -1390,7 +1663,7 @@ function runLlmLatexMvp()
     return
   end
 
-  local ok, insertErr = pcall(insertLatex, latex, selectionInfo)
+  local ok, insertErr = pcall(insertLatex, latex, selectionInfo, settings, payload)
   if not ok then
     showError("Failed to insert LaTeX element: " .. tostring(insertErr))
     return
