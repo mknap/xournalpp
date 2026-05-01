@@ -2,6 +2,7 @@
 -- 1) Collect selection metadata from strokes/images/texts
 -- 2) Send payload to an external LLM endpoint
 -- 3) Insert returned LaTeX as text (Phase 1 fallback)
+-- 4) Insert returned LaTeX as alatex opbject (Phase 2+)
 
 local CONFIG_FILENAME = "llm_latex.conf"
 local MENU_NAME = "LLM to LaTeX (MVP)"
