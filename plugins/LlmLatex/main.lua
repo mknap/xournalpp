@@ -912,14 +912,14 @@ local function persistDebugFile(filename, content)
 end
 
 local function saveDebugSnapshot(endpoint, body, raw, curlErr, httpCode, exitCode, debugParts)
-  local requestPath = persistDebugFile("llm_latex_last_request.json", body or "")
-  local responsePath = persistDebugFile("llm_latex_last_response.json", raw or "")
+  local requestPath = persistDebugFile("request.json", body or "")
+  local responsePath = persistDebugFile("response.json", raw or "")
 
   if debugParts then
-    persistDebugFile("llm_latex_last_user_content.txt", debugParts.userContent or "")
-    persistDebugFile("llm_latex_last_selection_bounds.json", debugParts.selectionBounds or "")
+    persistDebugFile("user_content.txt", debugParts.userContent or "")
+    persistDebugFile("selection_bounds.json", debugParts.selectionBounds or "")
     if debugParts.selectionImageData then
-      persistDebugFile("llm_latex_last_selection_image.png", debugParts.selectionImageData)
+      persistDebugFile("selection_image.png", debugParts.selectionImageData)
     end
   end
 
@@ -933,7 +933,7 @@ local function saveDebugSnapshot(endpoint, body, raw, curlErr, httpCode, exitCod
   }
   appendTimingMeta(metaLines, "timing_", debugParts and debugParts.timing)
   local meta = table.concat(metaLines, "\n")
-  local metaPath = persistDebugFile("llm_latex_last_debug.txt", meta)
+  local metaPath = persistDebugFile("debug.txt", meta)
 
   return requestPath, responsePath, metaPath
 end
