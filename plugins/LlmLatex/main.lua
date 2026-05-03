@@ -1264,20 +1264,27 @@ local function pickInsertPosition(selectionInfo)
   return 40, 40
 end
 
-local function insertLatexAsText(latex, selectionInfo)
+local function insertLatex(latex, selectionInfo)
   local x, y = pickInsertPosition(selectionInfo)
+  local width = nil
+  local height = nil
+  if selectionInfo and selectionInfo.boundingBox then
+    width = tonumber(selectionInfo.boundingBox.width)
+    height = tonumber(selectionInfo.boundingBox.height)
+  end
   local opts = {
-    texts = {
+    latexItems = {
       {
-        text = latex,
-        color = 0x000000,
+        latex = latex,
         x = x,
-        y = y
+        y = y,
+        width = width,
+        height = height
       }
     },
     allowUndoRedoAction = "grouped"
   }
-  local refs = app.addTexts(opts)
+  local refs = app.addLatex(opts)
   if refs and #refs > 0 then
     app.clearSelection()
     app.addToSelection(refs)
@@ -1329,9 +1336,9 @@ function runLlmLatexMvp()
     return
   end
 
-  local ok, insertErr = pcall(insertLatexAsText, latex, selectionInfo)
+  local ok, insertErr = pcall(insertLatex, latex, selectionInfo)
   if not ok then
-    showError("Failed to insert LaTeX text: " .. tostring(insertErr))
+    showError("Failed to insert LaTeX element: " .. tostring(insertErr))
     return
   end
 

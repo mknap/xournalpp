@@ -376,6 +376,39 @@ function app.addStrokes(opts) end
 --- }
 function app.addTexts(opts) end
 
+--- Adds rendered LaTeX elements as specified to the current layer.
+--- 
+--- Global parameters:
+---   - latexItems table: array of latex-parameter-tables
+---   - allowUndoRedoAction string: Decides how the change gets introduced into the undoRedo action list "individual",
+--- "grouped" or "none"
+--- 
+--- @param opts {latexItems:{latex:string, x:number, y:number, width:number|nil, height:number|nil}[],
+--- allowUndoRedoAction:string}
+--- @return lightuserdata[] references to the created TeX elements
+--- 
+--- Parameters per LaTeX item:
+---   - latex string: TeX source (required)
+---   - x number: x-position of the element (required)
+---   - y number: y-position of the element (required)
+---   - width number: desired width of the element (optional)
+---   - height number: desired height of the element (optional)
+--- 
+--- Example:
+--- 
+--- local refs = app.addLatex({
+---   latexItems = {
+---     {
+---       latex = "\\frac{a}{b}",
+---       x = 100,
+---       y = 120,
+---       width = 180,
+---     },
+---   },
+---   allowUndoRedoAction = "grouped",
+--- })
+function app.addLatex(opts) end
+
 --- Returns a list of lua table of the texts (from current selection / current layer / current page / all pages).
 --- When called with "page" to retrieve all elements on the current page, it also adds a field "layer" for the
 --- layer containing the element, and when called with "all" it additionally adds a field "page" containing its page
