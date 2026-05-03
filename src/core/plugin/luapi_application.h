@@ -1707,6 +1707,86 @@ static int applib_addTexImages(lua_State* L) {
 }
 
 /**
+ * Adds rendered LaTeX elements as specified to the current layer.
+ *
+ * Global parameters:
+ *   - latexItems table: array of latex-parameter-tables
+ *   - allowUndoRedoAction string: Decides how the change gets introduced into the undoRedo action list "individual",
+ *     "grouped" or "none"
+ */
+static int applib_addLatex(lua_State* L) {
+    Plugin* plugin = Plugin::getPluginFromLua(L);
+    Control* control = plugin->getControl();
+    PageRef const& page = control->getCurrentPage();
+    Layer* layer = page->getSelectedLayer();
+
+    std::vector<const Element*> latexItems;
+
+    lua_settop(L, 1);
+    luaL_checktype(L, 1, LUA_TTABLE);
+
+    lua_getfield(L, 1, "latexItems");
+    if (!lua_istable(L, -1)) {
+        return luaL_error(L, "Missing latexItems table!");
+    }
+
+    size_t numItems = lua_rawlen(L, -1);
+    for (size_t index = 1; index <= numItems; index++) {
+        lua_pushinteger(L, as_signed(index));
+        lua_gettable(L, -2);
+        luaL_checktype(L, -1, LUA_TTABLE);
+
+        lua_getfield(L, -1, "latex");
+        lua_getfield(L, -2, "x");
+        lua_getfield(L, -3, "y");
+        lua_getfield(L, -4, "width");
+        lua_getfield(L, -5, "height");
+
+        if (!lua_isstring(L, -5)) {
+            return luaL_error(L, "Missing latex!/'latex' must be a string");
+        }
+        if (!lua_isnumber(L, -4)) {
+            return luaL_error(L, "Missing X-Coordinate!/must be a number");
+        }
+        if (!lua_isnumber(L, -3)) {
+            return luaL_error(L, "Missing Y-Coordinate!/must be a number");
+        }
+        if (!lua_isnil(L, -2) && !lua_isnumber(L, -2)) {
+            return luaL_error(L, "'width' must be a number or unset");
+        }
+        if (!lua_isnil(L, -1) && !lua_isnumber(L, -1)) {
+            return luaL_error(L, "'height' must be a number or unset");
+        }
+
+        std::string errorMessage;
+        auto texImage = LatexController::renderTexImage(control, lua_tostring(L, -5), lua_tonumber(L, -4),
+                                                        lua_tonumber(L, -3), luaL_optnumber(L, -2, 0),
+                                                        luaL_optnumber(L, -1, 0), &errorMessage);
+
+        lua_pop(L, 5);
+        lua_pop(L, 1);
+
+        if (!texImage) {
+            if (errorMessage.empty()) {
+                errorMessage = "Failed to render LaTeX.";
+            }
+            return luaL_error(L, "%s", errorMessage.c_str());
+        }
+
+        latexItems.push_back(texImage.get());
+        layer->addElement(std::move(texImage));
+    }
+
+    lua_getfield(L, 1, "allowUndoRedoAction");
+    const char* allowUndoRedoAction = luaL_optstring(L, -1, "grouped");
+    lua_pop(L, 1);
+    handleUndoRedoActionHelper(L, control, allowUndoRedoAction, latexItems);
+
+    refsHelper(L, latexItems);
+    return 1;
+}
+
+/**
  * Returns a list of lua table of the texts (from current selection / current layer / current page / all pages).
  * When called with "page" to retrieve all elements on the current page, it also adds a field "layer" for the
  * layer containing the element, and when called with "all" it additionally adds a field "page" containing its page
