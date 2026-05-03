@@ -17,8 +17,8 @@ local DEFAULT_SHOW_INSERT_DEBUG_DIALOGS = false
 local DEFAULT_MATCH_SELECTION_COLOR = true
 
 local DEFAULT_TIMEOUT_SEC = 15
-local MAX_STROKES = 50
-local MAX_POINTS_PER_STROKE = 80
+local MAX_STROKES = 150 -- limit number of strokes to prevent excessively large payloads and timeouts
+local MAX_POINTS_PER_STROKE = 100 -- limit number of points per stroke to prevent excessively large payloads and timeouts
 local MAX_TEXTS = 40
 local MAX_IMAGES = 10
 local MAX_RESPONSE_CHARS = 20000
@@ -1353,6 +1353,36 @@ local function dominantSelectionColor(payload)
   return bestColor
 end
 
+local function colorIntToRgb(color)
+  local c = tonumber(color)
+  if not c then
+    return nil, nil, nil
+  end
+  c = math.floor(c) % 0x1000000
+  local r = math.floor(c / 0x10000) % 0x100
+  local g = math.floor(c / 0x100) % 0x100
+  local b = c % 0x100
+  return r, g, b
+end
+
+local function forceLatexColor(latex, color)
+  local r, g, b = colorIntToRgb(color)
+  if not r then
+    return latex
+  end
+
+  local src = trim(tostring(latex or ""))
+  if src == "" then
+    return latex
+  end
+
+  -- Remove direct color switches so selection color can be enforced consistently.
+  src = src:gsub("\\color%s*%b[]%s*%b{}", "")
+  src = src:gsub("\\color%s*%b{}", "")
+
+  return string.format("\\begingroup\\color[RGB]{%d,%d,%d}%s\\endgroup", r, g, b, src)
+end
+
 local function recolorCurrentSelection(color)
   local targetColor = tonumber(color)
   if not targetColor then
@@ -1377,6 +1407,36 @@ local function recolorCurrentSelection(color)
   return targetColor
 end
 
+local function withTemporaryActiveToolColor(color, fn)
+  local targetColor = tonumber(color)
+  if not targetColor then
+    return fn()
+  end
+
+  local activeToolInfo = safeCall(app.getToolInfo, "active") or {}
+  local originalToolColor = tonumber(activeToolInfo.color)
+
+  safeCall(app.changeToolColor, {
+    color = targetColor,
+    selection = false
+  })
+
+  local ok, result = pcall(fn)
+
+  if originalToolColor and originalToolColor ~= targetColor then
+    safeCall(app.changeToolColor, {
+      color = originalToolColor,
+      selection = false
+    })
+  end
+
+  if not ok then
+    error(result)
+  end
+
+  return result
+end
+
 local function insertLatex(latex, selectionInfo, settings, payload)
   local insertBounds = resolveInsertBounds(selectionInfo, payload)
   local x, y = pickInsertPosition(selectionInfo)
@@ -1397,12 +1457,24 @@ local function insertLatex(latex, selectionInfo, settings, payload)
     width = targetWidth
   end
 
-  local refs = insertLatexItem(latex, x, y, width, height, "grouped")
+  local selectionColor = nil
+  if settings and settings.matchSelectionColor then
+    selectionColor = dominantSelectionColor(payload)
+  end
+
+  local latexToInsert = latex
+  if selectionColor then
+    latexToInsert = forceLatexColor(latexToInsert, selectionColor)
+  end
+
+  local refs = withTemporaryActiveToolColor(selectionColor, function()
+    return insertLatexItem(latexToInsert, x, y, width, height, "grouped")
+  end)
+
   if refs and #refs > 0 then
     app.clearSelection()
     app.addToSelection(refs)
-    if settings and settings.matchSelectionColor then
-      local selectionColor = dominantSelectionColor(payload)
+    if settings and settings.matchSelectionColor and selectionColor then
       recolorCurrentSelection(selectionColor)
     end
   end
