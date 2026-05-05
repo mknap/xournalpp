@@ -94,6 +94,24 @@ function app.msgbox() end
 --- Warning: the callback function is never called if the dialog is closed without pressing one of the custom buttons.
 function app.openDialog(message, options, cb, error) end
 
+--- Open a multi-field form dialog and return entered values as a table.
+--- Returns nil when the user cancels/closes the dialog.
+---
+--- @param title string dialog title (optional, defaults to "Input")
+--- @param message string helper text shown above all fields (optional)
+--- @param fields {key:string, label:string|nil, defaultText:string|nil}[] array of fields
+--- @return table|nil values table keyed by each field's key
+---
+--- Example:
+---   local values = app.formDialog("Config", "Edit values", {
+---     { key = "endpoint", label = "Endpoint", defaultText = "" },
+---     { key = "model", label = "Model", defaultText = "gpt" }
+---   })
+---   if values ~= nil then
+---     print(values.endpoint)
+---   end
+function app.formDialog(title, message, fields) end
+
 --- Allow to register menupoints and toolbar buttons. This needs to be called from initUi
 --- 
 --- @param opts {menu: string, callback: string, toolbarID: string, mode:integer, accelerator:string} options (`mode`,

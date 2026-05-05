@@ -496,6 +496,116 @@ static int applib_openDialog(lua_State* L) {
     return 0;
 }
 
+/**
+ * Open a multi-field form dialog and return entered values as a table.
+ *
+ * @param title string dialog title (optional, defaults to "Input")
+ * @param message string helper text shown above all fields (optional)
+ * @param fields table array of field definitions: { key=string, label=string|nil, defaultText=string|nil }
+ * @return table|nil table mapping field key -> entered text (nil when canceled)
+ *
+ * Example:
+ *   local values = app.formDialog("Config", "Edit values", {
+ *     { key = "endpoint", label = "Endpoint", defaultText = "" },
+ *     { key = "model", label = "Model", defaultText = "gpt" }
+ *   })
+ *   if values ~= nil then
+ *     print(values.endpoint)
+ *   end
+ */
+static int applib_formDialog(lua_State* L) {
+    // discard any extra arguments passed in
+    lua_settop(L, 3);
+
+    const char* title = luaL_optstring(L, 1, _("Input"));
+    const char* message = luaL_optstring(L, 2, "");
+    luaL_checktype(L, 3, LUA_TTABLE);
+
+    Plugin* plugin = Plugin::getPluginFromLua(L);
+    Control* ctrl = plugin->getControl();
+    GtkWindow* parent = ctrl ? ctrl->getGtkWindow() : nullptr;
+
+    GtkWidget* dialog = gtk_dialog_new_with_buttons(title, parent,
+                                                     static_cast<GtkDialogFlags>(GTK_DIALOG_MODAL |
+                                                                                 GTK_DIALOG_DESTROY_WITH_PARENT),
+                                                     _("Cancel"), GTK_RESPONSE_CANCEL, _("OK"),
+                                                     GTK_RESPONSE_ACCEPT, nullptr);
+
+    GtkWidget* content = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+
+    if (message != nullptr && strlen(message) > 0) {
+        GtkWidget* messageLabel = gtk_label_new(message);
+        gtk_label_set_xalign(GTK_LABEL(messageLabel), 0.0f);
+        gtk_label_set_line_wrap(GTK_LABEL(messageLabel), TRUE);
+        gtk_box_pack_start(GTK_BOX(content), messageLabel, FALSE, FALSE, 6);
+    }
+
+    GtkWidget* grid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 6);
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 12);
+    gtk_box_pack_start(GTK_BOX(content), grid, FALSE, FALSE, 6);
+
+    std::vector<std::string> fieldKeys;
+    std::vector<GtkWidget*> fieldEntries;
+
+    const size_t fieldCount = lua_rawlen(L, 3);
+    for (size_t i = 1; i <= fieldCount; ++i) {
+        lua_rawgeti(L, 3, static_cast<lua_Integer>(i));  // push fields[i]
+        if (!lua_istable(L, -1)) {
+            gtk_widget_destroy(dialog);
+            return luaL_error(L, "fields[%d] must be a table", static_cast<int>(i));
+        }
+
+        lua_getfield(L, -1, "key");
+        const char* key = luaL_checkstring(L, -1);
+        lua_pop(L, 1);
+
+        lua_getfield(L, -1, "label");
+        const char* labelText = lua_isnil(L, -1) ? key : luaL_checkstring(L, -1);
+        lua_pop(L, 1);
+
+        lua_getfield(L, -1, "defaultText");
+        const char* defaultText = lua_isnil(L, -1) ? "" : luaL_checkstring(L, -1);
+        lua_pop(L, 1);
+
+        GtkWidget* label = gtk_label_new(labelText);
+        gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
+
+        GtkWidget* entry = gtk_entry_new();
+        gtk_entry_set_text(GTK_ENTRY(entry), defaultText);
+        gtk_entry_set_activates_default(GTK_ENTRY(entry), TRUE);
+        gtk_widget_set_hexpand(entry, TRUE);
+        gtk_widget_set_size_request(entry, 420, -1);
+
+        int row = static_cast<int>(i - 1);
+        gtk_grid_attach(GTK_GRID(grid), label, 0, row, 1, 1);
+        gtk_grid_attach(GTK_GRID(grid), entry, 1, row, 1, 1);
+
+        fieldKeys.emplace_back(key);
+        fieldEntries.emplace_back(entry);
+
+        lua_pop(L, 1);  // pop fields[i]
+    }
+
+    gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_ACCEPT);
+    gtk_widget_show_all(dialog);
+
+    int result = gtk_dialog_run(GTK_DIALOG(dialog));
+    if (result == GTK_RESPONSE_ACCEPT) {
+        lua_newtable(L);
+        for (size_t i = 0; i < fieldEntries.size(); ++i) {
+            const char* value = gtk_entry_get_text(GTK_ENTRY(fieldEntries[i]));
+            lua_pushstring(L, value ? value : "");
+            lua_setfield(L, -2, fieldKeys[i].c_str());
+        }
+        gtk_widget_destroy(dialog);
+        return 1;
+    }
+
+    gtk_widget_destroy(dialog);
+    return 0;
+}
+
 
 /**
  * Allow to register menupoints and toolbar buttons. This needs to be called from initUi
@@ -3936,6 +4046,7 @@ static int applib_setFont(lua_State* L) {
 static const luaL_Reg applib[] = {
         {"msgbox", applib_msgbox},  // Todo(gtk4) remove this deprecated function
         {"openDialog", applib_openDialog},
+    {"formDialog", applib_formDialog},
         {"getActionState", applib_getActionState},
         {"changeActionState", applib_changeActionState},
         {"activateAction", applib_activateAction},
