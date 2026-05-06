@@ -1609,8 +1609,30 @@ static int applib_addTexts(lua_State* L) {
  *   - latexItems table: array of latex-parameter-tables
  *   - allowUndoRedoAction string: Decides how the change gets introduced into the undoRedo action list "individual",
  *     "grouped" or "none"
+ * 
+ * @param opts {latexItems:{formula:string, x:number, y:number, width:number|nil, height:number|nil}[],
+ * allowUndoRedoAction:string}
+ * @return lightuserdata[] references to the created LaTeX elements
+ * 
+ * Parameters per LaTeX element:
+ *   - formula string: LaTeX code to render (required)
+ *   - x number: x-position of the rendered image (upper left corner) (required)
+ *   - y number: y-position of the rendered image (upper left corner) (required)
+ *   - width number: width of the rendered image (optional, default: natural width of the rendered image)
+ *   - height number: height of the rendered image (optional, default: natural height of the rendered image)
+ * 
+ * Example:   
+ * 
+ * local refs = app.addTexImages{latexItems={
+ *   {
+ *     formula = "\\frac{1}{\\sqrt{\\pi}}e^{-x^2}",
+ *     x = 50.0,
+ *     y = 50.0, 
+ *     width = 100.0, -- optional
+ *     height = 50.0, -- optional
+ *  }
  */
-static int applib_TexImages(lua_State* L) {
+static int applib_addTexImages(lua_State* L) {
     Plugin* plugin = Plugin::getPluginFromLua(L);
     Control* control = plugin->getControl();
     PageRef const& page = control->getCurrentPage();
@@ -1671,16 +1693,16 @@ static int applib_TexImages(lua_State* L) {
             return luaL_error(L, "%s", errorMessage.c_str());
         }
 
-        latexItems.push_back(texImage.get());
+        texItems.push_back(texImage.get());
         layer->addElement(std::move(texImage));
     }
 
     lua_getfield(L, 1, "allowUndoRedoAction");
     const char* allowUndoRedoAction = luaL_optstring(L, -1, "grouped");
     lua_pop(L, 1);
-    handleUndoRedoActionHelper(L, control, allowUndoRedoAction, latexItems);
+    handleUndoRedoActionHelper(L, control, allowUndoRedoAction, texItems);
 
-    refsHelper(L, latexItems);
+    refsHelper(L, texItems);
     return 1;
 }
 

@@ -376,6 +376,36 @@ function app.addStrokes(opts) end
 --- }
 function app.addTexts(opts) end
 
+--- Adds rendered LaTeX elements as specified to the current layer.
+--- TODO: better docs (rolandlo: see applbib_addTexts) Discussion#7433 demonstrates use. Original PR#7440 had suggestions
+--- Global parameters:
+---   - latexItems table: array of latex-parameter-tables
+---   - allowUndoRedoAction string: Decides how the change gets introduced into the undoRedo action list "individual",
+---     "grouped" or "none"
+--- 
+--- @param opts {latexItems:{formula:string, x:number, y:number, width:number|nil, height:number|nil}[],
+--- allowUndoRedoAction:string}
+--- @return lightuserdata[] references to the created LaTeX elements
+--- 
+--- Parameters per LaTeX element:
+---   - formula string: LaTeX code to render (required)
+---   - x number: x-position of the rendered image (upper left corner) (required)
+---   - y number: y-position of the rendered image (upper left corner) (required)
+---   - width number: width of the rendered image (optional, default: natural width of the rendered image)
+---   - height number: height of the rendered image (optional, default: natural height of the rendered image)
+--- 
+--- Example:   
+--- 
+--- local refs = app.addTexImages{latexItems={
+---   {
+---     formula = "\\frac{1}{\\sqrt{\\pi}}e^{-x^2}",
+---     x = 50.0,
+---     y = 50.0, 
+---     width = 100.0, -- optional
+---     height = 50.0, -- optional
+---  }
+function app.addTexImages(opts) end
+
 --- Returns a list of lua table of the texts (from current selection / current layer / current page / all pages).
 --- When called with "page" to retrieve all elements on the current page, it also adds a field "layer" for the
 --- layer containing the element, and when called with "all" it additionally adds a field "page" containing its page
@@ -1047,3 +1077,163 @@ function app.getFont() end
 ---   app.setFont({size = 14})       -- Only change font size
 function app.setFont(font) end
 
+---@alias Action
+---| "new-file"
+---| "open"
+---| "annotate-pdf"
+---| "save"
+---| "save-as"
+---| "export-as-pdf"
+---| "export-as"
+---| "print"
+---| "quit"
+---| "arrange-selection-order"
+---| "undo"
+---| "redo"
+---| "cut"
+---| "copy"
+---| "paste"
+---| "search"
+---| "select-all"
+---| "delete"
+---| "move-selection-layer-up"
+---| "move-selection-layer-down"
+---| "rotation-snapping"
+---| "grid-snapping"
+---| "preferences"
+---| "paired-pages-mode"
+---| "paired-pages-offset"
+---| "presentation-mode"
+---| "fullscreen"
+---| "show-sidebar"
+---| "show-toolbar"
+---| "set-layout-vertical"
+---| "set-layout-right-to-left"
+---| "set-layout-bottom-to-top"
+---| "set-columns-or-rows"
+---| "manage-toolbar"
+---| "customize-toolbar"
+---| "show-menubar"
+---| "zoom-in"
+---| "zoom-out"
+---| "zoom-100"
+---| "zoom-fit"
+---| "zoom"
+---| "goto-first"
+---| "goto-previous"
+---| "goto-page"
+---| "goto-next"
+---| "goto-last"
+---| "goto-next-annotated-page"
+---| "goto-previous-annotated-page"
+---| "navigate-back"
+---| "navigate-forward"
+---| "new-page-before"
+---| "new-page-after"
+---| "new-page-at-end"
+---| "duplicate-page"
+---| "move-page-towards-beginning"
+---| "move-page-towards-end"
+---| "append-new-pdf-pages"
+---| "configure-page-template"
+---| "delete-page"
+---| "paper-format"
+---| "paper-background-color"
+---| "select-tool"
+---| "select-default-tool"
+---| "tool-draw-shape-recognizer"
+---| "tool-draw-rectangle"
+---| "tool-draw-ellipse"
+---| "tool-draw-arrow"
+---| "tool-draw-double-arrow"
+---| "tool-draw-coordinate-system"
+---| "tool-draw-line"
+---| "tool-draw-spline"
+---| "setsquare"
+---| "compass"
+---| "tool-pen-size"
+---| "tool-pen-line-style"
+---| "tool-pen-fill"
+---| "tool-pen-fill-opacity"
+---| "tool-eraser-size"
+---| "tool-eraser-type"
+---| "tool-highlighter-size"
+---| "tool-highlighter-fill"
+---| "tool-highlighter-fill-opacity"
+---| "tool-select-pdf-text-marker-opacity"
+---| "toggle-touch-drawing"
+---| "audio-record"
+---| "audio-pause-playback"
+---| "audio-stop-playback"
+---| "audio-seek-forwards"
+---| "audio-seek-backwards"
+---| "select-font"
+---| "font"
+---| "tex"
+---| "plugin-manager"
+---| "help"
+---| "demo"
+---| "about"
+---| "tool-size"
+---| "tool-fill"
+---| "tool-fill-opacity"
+---| "tool-color"
+---| "select-color"
+---| "layer-show-all"
+---| "layer-hide-all"
+---| "layer-new-above-current"
+---| "layer-new-below-current"
+---| "layer-copy"
+---| "layer-move-up"
+---| "layer-move-down"
+---| "layer-delete"
+---| "layer-merge-down"
+---| "layer-rename"
+---| "layer-goto-next"
+---| "layer-goto-previous"
+---| "layer-goto-top"
+---| "layer-active"
+---| "position-highlighting"
+
+---@enum
+app.C = {
+    ToolSize_veryThin = 0,
+    ToolSize_thin = 1,
+    ToolSize_medium = 2,
+    ToolSize_thick = 3,
+    ToolSize_veryThick = 4,
+    ToolSize_none = 5,
+    Tool_none = 0,
+    Tool_pen = 1,
+    Tool_eraser = 2,
+    Tool_highlighter = 3,
+    Tool_text = 4,
+    Tool_image = 5,
+    Tool_selectRect = 6,
+    Tool_selectRegion = 7,
+    Tool_selectMultiLayerRect = 8,
+    Tool_selectMultiLayerRegion = 9,
+    Tool_selectObject = 10,
+    Tool_playObject = 11,
+    Tool_verticalSpace = 12,
+    Tool_hand = 13,
+    Tool_drawRect = 14,
+    Tool_drawEllipse = 15,
+    Tool_drawArrow = 16,
+    Tool_drawDoubleArrow = 17,
+    Tool_drawCoordinateSystem = 18,
+    Tool_showFloatingToolbox = 19,
+    Tool_drawSpline = 20,
+    Tool_selectPdfTextLinear = 21,
+    Tool_selectPdfTextRect = 22,
+    Tool_laserPointerPen = 23,
+    Tool_laserPointerHighlighter = 24,
+    EraserType_none = 0,
+    EraserType_default = 1,
+    EraserType_whiteout = 2,
+    EraserType_deleteStroke = 3,
+    OrderChange_bringToFront = 0,
+    OrderChange_bringForward = 1,
+    OrderChange_sendBackward = 2,
+    OrderChange_sendToBack = 3,
+}
