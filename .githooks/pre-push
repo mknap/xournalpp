@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+remote_name="${1:-origin}"
+refs_file="$(mktemp)"
+cat >"${refs_file}"
+
+"${repo_root}/.githooks/run-clang-format.sh" pre-push "${remote_name}" "${refs_file}"
+status=$?
+rm -f "${refs_file}"
+exit "${status}"
