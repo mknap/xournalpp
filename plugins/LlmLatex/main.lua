@@ -1276,10 +1276,10 @@ local function deleteSelectionRefs(refs)
 end
 
 local function insertLatexItem(latex, x, y, width, height, undoMode)
-  return app.texImages({
-    latexItems = {
+  return app.addTexImages({
+    texItems = {
       {
-        latex = latex,
+        formula = latex,
         x = x,
         y = y,
         width = width,
