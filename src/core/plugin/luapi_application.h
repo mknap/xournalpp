@@ -24,6 +24,7 @@
 
 #include "control/Control.h"
 #include "control/ExportHelper.h"
+#include "control/LatexController.h"
 #include "control/PageBackgroundChangeController.h"
 #include "control/ScrollHandler.h"
 #include "control/Tool.h"
@@ -53,6 +54,7 @@
 #include "model/SplineSegment.h"
 #include "model/Stroke.h"
 #include "model/StrokeStyle.h"
+#include "model/TexImage.h"
 #include "model/Text.h"
 #include "model/XojPage.h"  // IWYU pragma: keep for XojPage
 #include "plugin/Plugin.h"
@@ -1597,6 +1599,88 @@ static int applib_addTexts(lua_State* L) {
     handleUndoRedoActionHelper(L, control, allowUndoRedoAction, texts);
 
     refsHelper(L, texts);
+    return 1;
+}
+
+/**
+ * Adds rendered LaTeX elements as specified to the current layer.
+ * TODO: better docs (rolandlo: see applbib_addTexts) Discussion#7433 demonstrates use. Original PR#7440 had suggestions
+ * Global parameters:
+ *   - latexItems table: array of latex-parameter-tables
+ *   - allowUndoRedoAction string: Decides how the change gets introduced into the undoRedo action list "individual",
+ *     "grouped" or "none"
+ */
+static int applib_TexImages(lua_State* L) {
+    Plugin* plugin = Plugin::getPluginFromLua(L);
+    Control* control = plugin->getControl();
+    PageRef const& page = control->getCurrentPage();
+    Layer* layer = page->getSelectedLayer();
+
+    std::vector<const Element*> texItems;
+
+    lua_settop(L, 1);
+    luaL_checktype(L, 1, LUA_TTABLE);
+
+    lua_getfield(L, 1, "texItems");
+    if (!lua_istable(L, -1)) {
+        return luaL_error(L, "Missing latexItems table!");
+    }
+
+    size_t numItems = lua_rawlen(L, -1);
+    for (size_t index = 1; index <= numItems; index++) {
+        lua_pushinteger(L, as_signed(index));
+        lua_gettable(L, -2);
+        luaL_checktype(L, -1, LUA_TTABLE);
+
+        lua_getfield(L, -1, "formula");
+        lua_getfield(L, -2, "x");
+        lua_getfield(L, -3, "y");
+        lua_getfield(L, -4, "width");
+        lua_getfield(L, -5, "height");
+
+        /** TODO: add comment on how stack looks right now */
+        if (!lua_isstring(L, -5)) {
+            return luaL_error(L, "Missing formula!/'formula' must be a string");
+        }
+        if (!lua_isnumber(L, -4)) {
+            return luaL_error(L, "Missing X-Coordinate!/must be a number");
+        }
+        if (!lua_isnumber(L, -3)) {
+            return luaL_error(L, "Missing Y-Coordinate!/must be a number");
+        }
+        if (!lua_isnil(L, -2) && !lua_isnumber(L, -2)) {
+            return luaL_error(L, "'width' must be a number or unset");
+        }
+        if (!lua_isnil(L, -1) && !lua_isnumber(L, -1)) {
+            return luaL_error(L, "'height' must be a number or unset");
+        }
+
+        std::string errorMessage;
+        auto texImage =
+                LatexController::renderTexImage(control, lua_tostring(L, -5), lua_tonumber(L, -4), lua_tonumber(L, -3),
+                                                luaL_optnumber(L, -2, 0), luaL_optnumber(L, -1, 0), &errorMessage);
+
+        // lua_pop(L, 5);
+        // lua_pop(L, 1);
+        lua_pop(L, 6);  // pop values read out from the texItems table + texItems-table itself
+
+        if (!texImage) {
+            if (errorMessage.empty()) {
+                errorMessage = "Failed to render LaTeX.";
+            }
+            return luaL_error(L, "%s", errorMessage.c_str());
+        }
+
+        latexItems.push_back(texImage.get());
+        layer->addElement(std::move(texImage));
+    }
+
+    lua_getfield(L, 1, "allowUndoRedoAction");
+    const char* allowUndoRedoAction = luaL_optstring(L, -1, "grouped");
+    lua_pop(L, 1);
+    handleUndoRedoActionHelper(L, control, allowUndoRedoAction, latexItems);
+
+    refsHelper(L, latexItems);
     return 1;
 }
 
@@ -3891,6 +3975,7 @@ static const luaL_Reg applib[] = {
         {"addStrokes", applib_addStrokes},
         {"addSplines", applib_addSplines},
         {"addImages", applib_addImages},
+        {"addTexImages", applib_addTexImages},
         {"addTexts", applib_addTexts},
         {"addToSelection", applib_addToSelection},
         {"clearSelection", applib_clearSelection},
